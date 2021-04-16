@@ -37,7 +37,8 @@ class ScoreCard:
             unique_value = np.unique(x_category.iloc[:,i])
             unique_value = unique_value[np.where(unique_value!='blank')]
             this_transform_rule = pd.concat([pd.DataFrame(unique_value,columns=['raw_data']),\
-                                            pd.DataFrame(np.zeros([len(unique_value),2]), columns=['transform_data', 'bad_rate'])])
+                                            pd.DataFrame(np.zeros([len(unique_value),2]), columns=['transform_data', 'bad_rate'])],
+                                            axis=1)
             
             for j in range(0, len(unique_value)):
                 this_unique = unique_value[j]
@@ -50,7 +51,8 @@ class ScoreCard:
             
             this_transform_rule = this_transform_rule.sort_values(by='bad_rate')
             this_transform_rule.iloc[:,1] = list(range(len(unique_value),0,-1))
-        
+            # 填回nan值
+            if 
     
 
 
