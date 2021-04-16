@@ -23,6 +23,9 @@ All_Data = All_Data.drop( All_Data[All_Data['cust_tag']=='D1'].index, axis=0 )
 All_Data = All_Data.drop(['CUS_NUM'], axis=1)
 Y = All_Data['cust_tag']
 All_Data = All_Data.drop(['cust_tag'], axis=1)
+Y = Y.replace('E', 1)
+Y = Y.replace('F', 1)
+Y = Y.replace('A', 0)
 
 # 2. Drop Features having "nan">95%;  KEY FUNC: df.count()
 FEA_moreNan = list()
