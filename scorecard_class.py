@@ -7,12 +7,15 @@ Created on Fri Apr 16 13:33:39 2021
 
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
+from sklearn import tree
+import re
 
 class ScoreCard:
     def __init__(self, orig_x, orig_y):
         self.orig_x = orig_x
         self.orig_y = orig_y
-    def transform_discrete(self): #按照transform rule的bad_rate转换类别型变量为数值
+    def transform_discrete(self): #按照bad_rate转换类别型变量为数值
         x = self.orig_x.copy()
         y = self.orig_y.copy()
         x.reset_index(drop=True, inplace=True)
@@ -51,18 +54,187 @@ class ScoreCard:
             
             this_transform_rule = this_transform_rule.sort_values(by='bad_rate')
             this_transform_rule.iloc[:,1] = list(range(len(unique_value),0,-1))
+            this_transform_rule.reset_index(drop=True, inplace=True)
             # 填回nan值
-            if 
-    
+            if len(unique_value)!=len(x_category.iloc[:, i].unique()):
+                this_transform_rule = this_transform_rule.append( pd.DataFrame({'raw_data': ['blank'], 'transform_data': [-99], 'bad_rate': [np.nan]}) )
+            # 规则装回总表
+            x_category_transfer_rule[i] = this_transform_rule
+            
+            # 把整个转换后的值按规则填回原数据表
+            unique_value = x_category.iloc[:, i].unique()
+            for j in range(0, len(unique_value)):
+                x_category_transform.iloc[np.where(x_category.iloc[:, i]==unique_value[j])[0], i] = this_transform_rule.iloc[np.where(this_transform_rule.iloc[:, 0]==unique_value[j])[0], 1].iloc[0]
+        # 合并连续型变量
+        x_category_transform.reset_index(drop=True, inplace=True)
+        x_num.reset_index(drop=True, inplace=True)
+        x_new = pd.concat([x_category_transform, x_num], axis=1)
+        return x_new, y, x_types
 
+    def cal_woe(self, data, dim, bucket_num=10, auto=True, bond_num=[]):
+        m = data.shape[0] 
+        X = data[:, dim]
+        y = data[:, -1]
+        tot_bad = np.sum(y == 1)
+        tot_good = np.sum(y == 0)
+        data = np.column_stack((X.reshape(m, 1), y.reshape(m, 1)))
+        cnt_bad = []
+        cnt_good = []
+        min = np.min(data[:, 0])
+        max = np.max(data[:, 0])
+        # bucket is the space between 2 bondaries
+        # index is the boundaries
+        if auto == True:
+            index = np.linspace(min, max, bucket_num + 1)
+        else:
+            index = bond_num
+            bucket_num = bond_num.shape[0] - 1
+        data_bad = data[data[:, 1] == 1, 0]  # Extract rows with y==1, and delete the y col
+        data_good = data[data[:, 1] == 0, 0] # Extract rows with y==0, and delete the y col
+        eps = 1e-8
+        for i in range(bucket_num): # count bad/good_num per bucket
+            if i < bucket_num - 1: # before  i==(bucket_num-1)
+                cnt_bad.append(1.0 * np.sum(np.bitwise_and(data_bad > index[i] - eps, data_bad < index[i + 1])))
+                cnt_good.append(1.0 * np.sum(np.bitwise_and(data_good > index[i] - eps, data_good < index[i + 1])))
+            else:
+                cnt_bad.append(1.0 * np.sum(np.bitwise_and(data_bad > index[i] - eps, data_bad < index[i + 1] + eps)))
+                cnt_good.append(1.0 * np.sum(np.bitwise_and(data_good > index[i] - eps, data_good < index[i + 1] + eps)))
+        bond = np.array(index)
+        cnt_bad = np.array(cnt_bad)
+        cnt_good = np.array(cnt_good)
+        
+        #对完美分箱增加一个虚拟样本，保证有woe值
+        cnt_bad[cnt_bad==0]+=1
+        cnt_good[cnt_good==0]+=1
+        
+        
+        length = cnt_bad.shape[0]
+        for i in range(length):
+            j = length - i - 1
+            ## after combing, i refers to the elements after proevious single-y's element,
+            ## so the cnt list would contain no single-y bucket after one single loop
+            if j != 0:
+                # this bucket has only one kind of 'y' -> combine with former
+                if cnt_bad[j] == 0 or cnt_good[j] == 0:
+                    cnt_bad[j - 1] += cnt_bad[j]
+                    cnt_good[j - 1] += cnt_good[j]
+                    cnt_bad = np.append(cnt_bad[:j], cnt_bad[j + 1:])
+                    cnt_good = np.append(cnt_good[:j], cnt_good[j + 1:])
+                    bond = np.append(bond[:j], bond[j + 1:])
+        ## since we only combine with former one bucket,
+        ## necessary to check the 1st bucket
+        if cnt_bad[0] == 0 or cnt_good[0] == 0:
+            cnt_bad[1] += cnt_bad[0]
+            cnt_good[1] += cnt_good[0]
+            cnt_bad = cnt_bad[1:]
+            cnt_good = cnt_good[1:]
+            bond = np.append(bond[0], bond[2:])
+        woe = np.log((cnt_bad / tot_bad) / (cnt_good / tot_good))
+        IV = ((cnt_bad / tot_bad) - (cnt_good / tot_good)) * woe
+        IV_tot = np.sum(IV)
+        bond_str = []
+        for b in bond:
+            bond_str.append(str(b))
+        box_num=  cnt_bad+ cnt_good
+        bad_rate=cnt_bad/box_num
+        
+        return IV_tot, IV, woe, bond, box_num, bad_rate
 
+    def woe_tree(self, min_elem_per_box_ratio=0.05, max_box_num=5, tolerance_despite_nan=0):
+        '''
+            min_elem_per_box_ratio: 最小每箱数据条数的比例
+            max_box_num: 最多箱数
+            tolerance_despite_nan: 除了nan最多允许的拐点数量
+        '''
+        x, y, x_types = self.transform_discrete()
+        data = pd.concat([x,y], axis=1)
+        x_split_points = list(np.zeros([len(x.columns), 1]))
+        
+        # cal_woe的返回
+        woe_list = []
+        IV_list=[]
+        IV_tot_list=[]
+        box_num_list=[]
+        bad_rate_list=[]
 
+        # 逐特征进行WOE分箱
+        for i in range(0, x.shape[1]):
+            # 最小每箱数据条数的比例
+            min_woe_boxing_num = int(round(len(y)*min_elem_per_box_ratio))
+            
+            # 'nan' 作独立分箱
+            thisFea_nonnan_position = np.where(x.iloc[:, i]!=-99)[0]
+            
+            # 如果存在nan，设置最多箱数-1
+            if len(thisFea_nonnan_position) == x.shape[0]:
+                max_bin_num = max_box_num
+            else:
+                max_bin_num = max_box_num-1           
+            
+            # 开始分箱
+            continue_bining = True
+            while continue_bining:
+                this_x = x.iloc[thisFea_nonnan_position, i]
+                this_x = this_x.values.reshape(-1, 1) # -1 means every row
+                this_y = y.iloc[thisFea_nonnan_position]
+                this_y = this_y.values.reshape(-1, 1)
+                
+                # 单列决策树拟合
+                groupdt = tree.DecisionTreeClassifier(criterion='entropy', max_depth=4, min_samples_leaf=min_woe_boxing_num, max_leaf_nodes=max_bin_num)
+                groupdt.fit(this_x, this_y)
+                
+                # 抽取决策树分箱后的数据
+                dot_data = tree.export_graphviz(groupdt)
+                pattern = re.compile('<= (.*?)\\\\nentropy', re.S)
+                split_num = re.findall(pattern, dot_data)
+                split_point = [float(j) for j in split_num]
+                final_split_points = sorted(split_point)
 
+                # 在分割点两端填充-inf和inf
+                final_split_points.insert(0, -np.inf)
+                final_split_points.append(np.inf)
+                if len(thisFea_nonnan_position) != x.shape[0]: # 'nan' Exists
+                    final_split_points.insert(1, -99) # 使用别的数据集时必须确定-99是最小的值
+                
+                # 完成当前分箱后，计算WOE，并检查其单调性，
+                # 如果不单调，max_leaf_nodes-1后重跑
+                IV_tot, IV, woe, bond, box_num, bad_rate = self.cal_woe(np.array(data), i, auto='False', bond_num=pd.Series(final_split_points))
 
+                if x_types.loc[x.columns[i]]=='object' or len(woe)<=3:
+                    break # 如果是类别型变量，或箱数不高于3，直接跳过下面的矫正
+                
+                # after obtaining the WOE table,
+                # changing-direction points should be checked
+                woe_direction = np.sign(woe[1:] - woe[:-1])
+                # direction_change_points == 2 or -2 Means Direction Changes
+                direction_change_points = np.abs(woe_direction[1:]-woe_direction[:-1])
+                direction_chang_times = np.sum( direction_change_points==2 )
+                
+                # Now, if the nan at the 1st place results to the np.abs(direction_change_points[0])==2
+                # Then direction_change_times -= 1
+                if len(thisFea_nonnan_position) != len(x) and direction_change_points[0] == 2:
+                    direction_chang_times -= 1
+                
+                if direction_chang_times == 0: # Bining Succeed
+                    continue_bining = False
+                else: # WOE not monotone, re-bining
+                    max_bin_num -= 1
+                    continue_bining = True
 
-
-
-
+                x_split_points[i]=final_split_points   
+            woe_list.append(woe)
+            IV_list.append(IV)
+            IV_tot_list.append(IV_tot)
+            box_num_list.append(box_num)
+            bad_rate_list.append(bad_rate)
+        
+        ################## WOE Bining DOOOOOOOOOOOOOOOOOOOOONE! ##################
+        x_split_points = pd.Series(x_split_points, index=x.columns)
+        woe_list = pd.Series(woe_list, index=x.columns)
+        IV_list = pd.Series(IV_list, index=x.columns)
+        IV_tot_list = pd.Series(IV_tot_list,index=x.columns)
+        box_num_list = pd.Series(box_num_list,index=x.columns)
+        bad_rate_list = pd.Series(bad_rate_list,index=x.columns)
 
 
 

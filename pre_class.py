@@ -7,6 +7,7 @@ Created on Fri Apr 16 12:46:08 2021
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
+from scorecard_class import ScoreCard
 
 #%% 
 #----------------------- 一. 导入数据 -----------------------#
