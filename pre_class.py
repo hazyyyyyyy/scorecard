@@ -8,6 +8,9 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from scorecard_class import ScoreCard
+from tqdm import tqdm
+from sklearn import tree
+import re
 
 #%% 
 #----------------------- 一. 导入数据 -----------------------#
@@ -66,10 +69,12 @@ X = x_train
 Y = y_train
 
 #%%
-#----------------------- 四. 建立评分卡 -----------------------#
 
+sc = ScoreCard(X,Y)
+binning_return = sc.woe_tree()
+print(binning_return['box_num_list'].apply(lambda x:np.sum(x)).unique())
 
-
+Fea_choosed_en_name = sc.filter_feature_by_3_models(binning_return)
 
 
 

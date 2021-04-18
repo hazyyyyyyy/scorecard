@@ -7,8 +7,11 @@ Created on Fri Apr 16 13:33:39 2021
 
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
 from sklearn import tree
+from sklearn import preprocessing
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from statsmodels.stats.outliers_influence import variance_inflation_factor 
 import re
 
 class ScoreCard:
@@ -91,14 +94,9 @@ class ScoreCard:
             bucket_num = bond_num.shape[0] - 1
         data_bad = data[data[:, 1] == 1, 0]  # Extract rows with y==1, and delete the y col
         data_good = data[data[:, 1] == 0, 0] # Extract rows with y==0, and delete the y col
-        eps = 1e-8
         for i in range(bucket_num): # count bad/good_num per bucket
-            if i < bucket_num - 1: # before  i==(bucket_num-1)
-                cnt_bad.append(1.0 * np.sum(np.bitwise_and(data_bad > index[i] - eps, data_bad < index[i + 1])))
-                cnt_good.append(1.0 * np.sum(np.bitwise_and(data_good > index[i] - eps, data_good < index[i + 1])))
-            else:
-                cnt_bad.append(1.0 * np.sum(np.bitwise_and(data_bad > index[i] - eps, data_bad < index[i + 1] + eps)))
-                cnt_good.append(1.0 * np.sum(np.bitwise_and(data_good > index[i] - eps, data_good < index[i + 1] + eps)))
+            cnt_bad.append(1.0 * np.sum(np.bitwise_and(data_bad > index[i], data_bad <= index[i + 1])))
+            cnt_good.append(1.0 * np.sum(np.bitwise_and(data_good > index[i], data_good <= index[i + 1])))
         bond = np.array(index)
         cnt_bad = np.array(cnt_bad)
         cnt_good = np.array(cnt_good)
@@ -109,7 +107,7 @@ class ScoreCard:
         
         
         length = cnt_bad.shape[0]
-        for i in range(length):
+        for i in range(length): # 检验分箱内是否只有一种y(向前合并)
             j = length - i - 1
             ## after combing, i refers to the elements after proevious single-y's element,
             ## so the cnt list would contain no single-y bucket after one single loop
@@ -145,6 +143,7 @@ class ScoreCard:
             min_elem_per_box_ratio: 最小每箱数据条数的比例
             max_box_num: 最多箱数
             tolerance_despite_nan: 除了nan最多允许的拐点数量
+            return: binning_return字典
         '''
         x, y, x_types = self.transform_discrete()
         data = pd.concat([x,y], axis=1)
@@ -221,7 +220,7 @@ class ScoreCard:
                     max_bin_num -= 1
                     continue_bining = True
 
-                x_split_points[i]=final_split_points   
+            x_split_points[i]=final_split_points   
             woe_list.append(woe)
             IV_list.append(IV)
             IV_tot_list.append(IV_tot)
@@ -235,6 +234,171 @@ class ScoreCard:
         IV_tot_list = pd.Series(IV_tot_list,index=x.columns)
         box_num_list = pd.Series(box_num_list,index=x.columns)
         bad_rate_list = pd.Series(bad_rate_list,index=x.columns)
+        
+        binning_return = {'x_split_points':x_split_points,\
+                          'woe_list':woe_list,\
+                          'IV_list':IV_list,\
+                          'IV_tot_list':IV_tot_list,\
+                          'box_num_list':box_num_list,\
+                          'bad_rate_list':bad_rate_list}
+
+        return binning_return
+
+    def filter_feature_by_3_models(self, binning_return,choose_2=True,Lasso_threshold = 0.01,RF_threshold = 0.001,IV_threshold = 0.1):
+        '''
+        binning_return:woe分箱的返回字典
+        choose_2:True-被至少两个模型选中的变量；False-被三个模型均选中多个变量
+        Lasso_threshold:LASSO模型的阈值
+        RF_threshold:随机森林特征重要性的阈值
+        IV_threshold:IV的阈值
+        return: x-woe替换后的数据,Fea_choosed_en_name-选中的特征
+        
+        函数解释：
+        转换数据原值为对应区间的woe值，
+        然后用三个模型根据阈值进行筛选
+        '''
+        x_split_points = binning_return['x_split_points']
+        woe_list = binning_return['woe_list']
+        IV_tot_list = binning_return['IV_tot_list']
+        
+        x, y, x_types = self.transform_discrete()
+        # 1. Transform Datasets into WOE bin
+        for thisFea in range(0, len(x.columns)):
+            thisFea_split = x_split_points[thisFea]
+            thisFea_woe = woe_list[thisFea]
+            for j in range(0, len(thisFea_split)-1): # loop stop at 2nd last element
+                x_thisFea_thisBox = np.where( (x.iloc[:, thisFea]>thisFea_split[j]) & (x.iloc[:, thisFea]<=thisFea_split[j+1]) )[0]
+                x.iloc[x_thisFea_thisBox, thisFea] = thisFea_woe[j]
+                                
+        # 2. Calculate Feature Importance by LASSO
+        x_scaled = preprocessing.scale(x)    
+        Logit_Lasso = LogisticRegression(penalty='l1', solver='liblinear', C=0.3, n_jobs=-1)
+        Logit_Lasso.fit(x_scaled, y)
+        coef_by_Lasso = np.abs(Logit_Lasso.coef_).T
+        coef_by_Lasso = pd.Series(coef_by_Lasso.reshape(-1), index = x.columns)
+        
+        
+        # 3. Calculate Feature Importance by Random Forest
+        RF_clf = RandomForestClassifier(n_estimators=1000, criterion='gini', n_jobs=-1, max_depth=10, min_samples_leaf=10)
+        RF_clf.fit(x, y)
+        coef_by_RF = RF_clf.feature_importances_
+        #coef_by_RF = coef_by_RF.reshape(-1, 1) # in accordance with the dimentionality of coef_by_Lasso
+        coef_by_RF = pd.Series(coef_by_RF.reshape(-1), index = x.columns)
+        
+        
+        # 4. Calculate Feature Importance by IV
+        coef_by_IV = IV_tot_list.copy()
+        
+        # 5. Select Features by Feature Importance of LASSO&RF       
+        Fea_choosed_by_Lasso = coef_by_Lasso.copy()
+        Fea_choosed_by_Lasso[ np.where(Fea_choosed_by_Lasso>Lasso_threshold)[0] ] = 1
+        Fea_choosed_by_Lasso[ np.where(Fea_choosed_by_Lasso<=Lasso_threshold)[0] ] = 0
+        
+        Fea_choosed_by_RF = coef_by_RF.copy()
+        Fea_choosed_by_RF[ np.where(Fea_choosed_by_RF>RF_threshold)[0] ] = 1
+        Fea_choosed_by_RF[ np.where(Fea_choosed_by_RF<=RF_threshold)[0] ] = 0
+        
+        Fea_choosed_by_IV = coef_by_IV.copy()
+        Fea_choosed_by_IV[ np.where(Fea_choosed_by_IV>IV_threshold)[0] ] = 1
+        Fea_choosed_by_IV[ np.where(Fea_choosed_by_IV<=IV_threshold)[0] ] = 0
+        
+        Fea_choosed = Fea_choosed_by_Lasso + Fea_choosed_by_RF + Fea_choosed_by_IV       
+        if choose_2:
+            feature_choosed_by_models = np.where(Fea_choosed >= 2)[0]
+        else:
+            feature_choosed_by_models = np.where(Fea_choosed == 3)[0]
+        Fea_choosed_en_name = list(x.columns[feature_choosed_by_models])
+
+        return x, Fea_choosed_en_name
+    
+    def filter_feature_by_correlation(self,x_woe,Fea_choosed_en_name,binning_return,corrcoef_threshold = 0.4,VIF_threshold = 10):
+        '''
+        x_woe : woe替换后的数据（filter_feature_by_3_models的第一份返回值）
+        Fea_choosed_en_name : 选中的特征（filter_feature_by_3_models的第二份返回值）
+        binning_return : woe分箱的返回字典
+        corrcoef_threshold : Pearson阈值
+        VIF_threshold : VIF阈值
+        return : Fea_choosed_en_name经过共线性筛选后的特征
+        '''
+        x = x_woe.copy()
+        IV_tot_list = binning_return['IV_tot_list']
+        # 1. 先根据Pearson筛选变量
+        corrcoef_matrix = np.corrcoef(x.loc[:, Fea_choosed_en_name].T)
+        for i in range(0, len(corrcoef_matrix)): # 对角线设为零
+            corrcoef_matrix[i, i] = 0
+        high_corrcoef = np.where( corrcoef_matrix >= corrcoef_threshold )
+        
+        while len(high_corrcoef[0])>0:
+            first_Fea = Fea_choosed_en_name[ high_corrcoef[0][0] ]
+            second_Fea = Fea_choosed_en_name[ high_corrcoef[1][0] ]
+            
+            if (IV_tot_list.loc[first_Fea] >= IV_tot_list.loc[second_Fea]):
+                Fea_choosed_en_name.remove(second_Fea)
+            else:
+                Fea_choosed_en_name.remove(first_Fea)
+            # Recompute the corrcoef_matrix
+            corrcoef_matrix = np.corrcoef(x.loc[:, Fea_choosed_en_name].T)
+            for i in range(0, len(corrcoef_matrix)): # 对角线设为零
+                corrcoef_matrix[i, i] = 0
+            high_corrcoef = np.where( corrcoef_matrix >= corrcoef_threshold )
+                
+        # 2. 再根据VIF筛选变量
+        vif = list()
+        for i in range(0, len(Fea_choosed_en_name)):
+            this_VIF = variance_inflation_factor(np.array(x.loc[:, Fea_choosed_en_name]), i)
+            vif.append(this_VIF)
+                
+        vif = pd.Series(vif, index = Fea_choosed_en_name)
+        
+        high_VIF = np.where(vif>VIF_threshold)[0]
+        for i in range(0, len(high_VIF)):
+            Fea_choosed_en_name.remove( Fea_choosed_en_name[high_VIF[i]] )
+
+        return Fea_choosed_en_name
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
