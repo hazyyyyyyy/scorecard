@@ -12,7 +12,9 @@ from sklearn import preprocessing
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from statsmodels.stats.outliers_influence import variance_inflation_factor 
+import statsmodels.api as sm
 import re
+import math
 
 class ScoreCard:
     def __init__(self, orig_x, orig_y):
@@ -251,7 +253,7 @@ class ScoreCard:
         Lasso_threshold:LASSO模型的阈值
         RF_threshold:随机森林特征重要性的阈值
         IV_threshold:IV的阈值
-        return: x-woe替换后的数据,Fea_choosed_en_name-选中的特征
+        return: fea_models_return字典。其中x为woe替换原值数据,Fea_choosed_en_name为选中的特征
         
         函数解释：
         转换数据原值为对应区间的woe值，
@@ -324,7 +326,7 @@ class ScoreCard:
         binning_return: woe分箱的返回字典
         corrcoef_threshold: Pearson阈值
         VIF_threshold  VIF阈值
-        return: Fea_choosed_en_name经过共线性筛选后的特征
+        return: corr_return字典。其中Fea_choosed_by_pearson为第一步pearson结果
         '''
         x = x_woe.copy()
         Fea_choosed_en_name = Fea_choosed.copy()
@@ -366,120 +368,96 @@ class ScoreCard:
                        'Fea_choosed_en_name':Fea_choosed_en_name}
         return corr_return
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    def rfe(self):
+        '''
+        空函数，还没做
+        '''
+        return
+    
+    def stepwise_ks(self):
+        '''
+        空函数，还没做
+        '''
+        return
+    
+    def lr(self, x, y, default=True):
+        '''
+        x: x_woe
+        y: y
+        default: 默认参数：penalty='l2', c=0.3
+        return: Lr_return字典。其中model为sklearn的Lr模型对象
+        '''
+        if default:
+            Lr= LogisticRegression(penalty='l2',C=0.3)
+            Lr.fit(x, y) 
+            
+            coef_Lr=Lr.coef_.transpose()  #提取特征权重
+            coef_intercept=Lr.intercept_  #提取截距
+            
+            # p test
+            logit = sm.Logit(y, x)
+            result = logit.fit()
+            print('Parameters: ', result.params)
+            margeff = result.get_margeff(dummy=True)
+            print(margeff.summary())
+            
+            Lr_return = {'model': Lr,
+                         'coef_Lr': coef_Lr,
+                         'coef_intercept': coef_intercept}
+            return Lr_return
+        else:
+            return {}
+        
+        #def ks(self):
+            
+        
+        # def create_scorecard(self,x, y, point0 = 600,odds0 = 0.05,PDO = 40):
+        #     '''
+        #     参数含义： odds0=bad_rate/good_rate=0.05时，point0=600；odds*2时，point变化值为PDO=40
+        #     '''
+        #     # 根据给定基准值，求参数A, B以及初始分数score0
+        #     # 公式：Point = A - B * log(odds)
+        #     B = PDO/math.log(2)
+        #     A = point0+B*math.log(odds0)
+        #     score0=A-B*coef_intercept #初始分数
+            
+        #     # 初始化评分卡
+        #     chosen_feature_num = x.shape[1]
+        #     ScoreCard = list(np.zeros([chosen_feature_num,]))
+        #     # 变量每一分箱区间的分数 = -该段woe值*该变量的逻辑回归系数*评分卡参数B
+            
+        #     for i in range(0, chosen_feature_num):
+        #         this_Fea = chosen_feature_final[i]
+        #         this_FeaType = x_train_types.loc[this_Fea]
+        #         this_Coef = coef_Lr[i]
+        #         this_SplitPoint = x_split_points.loc[this_Fea]
+        #         this_WOE = woe_list.loc[this_Fea]
+        #         this_SplitNum = len(this_SplitPoint)-1
+                
+        #         this_ScoreCard = pd.DataFrame(np.zeros([this_SplitNum, 2]))
+                
+        #         if this_FeaType=='float64' or this_FeaType=='int64':
+        #             for j in range(0, this_SplitNum):
+        #                 if j == this_SplitNum-1:
+        #                     this_ScoreCard.iloc[j,0]='('+str(this_SplitPoint[j])+','+str(this_SplitPoint[j+1])+')'
+        #                 else:
+        #                     this_ScoreCard.iloc[j,0]='('+str(this_SplitPoint[j])+','+str(this_SplitPoint[j+1])+']'
+        #                 this_ScoreCard.iloc[j,1] = -this_WOE[j]*this_Coef*B
+                    
+        #         else:
+        #             this_TranRule = x_train_category_tranRules[ x_train_category_tranRules_feaName.loc[this_Fea] ]
+                    
+        #             for j in range(0, this_SplitNum):
+        #                 this_Bin_Raw = this_TranRule.iloc[ np.where((this_TranRule.loc[:, 'Transform data']>this_SplitPoint[j])&(this_TranRule.loc[:, 'Transform data']<=this_SplitPoint[j+1]))[0], 0 ]
+                        
+        #                 this_ScoreCard.iloc[j, 0] = this_Bin_Raw.iloc[0]
+        #                 for k in range(1, len(this_Bin_Raw)):
+        #                     this_ScoreCard.iloc[j,0] = this_ScoreCard.iloc[j,0] + ', ' + this_Bin_Raw.iloc[k]
+                        
+        #                 this_ScoreCard.iloc[j, 1] = -this_WOE[j]*this_Coef*B
+            
+        #         ScoreCard[i] = this_ScoreCard
+        
 
 
 

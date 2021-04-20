@@ -8,9 +8,8 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from scorecard_class import ScoreCard
-from tqdm import tqdm
-from sklearn import tree
-import re
+# from sklearn import tree
+# import re
 
 #%% 
 #----------------------- 一. 导入数据 -----------------------#
@@ -76,9 +75,13 @@ print(binning_return['box_num_list'].apply(lambda x:np.sum(x)).unique())
 
 fea_models_return = sc.filter_feature_by_3_models(binning_return)
 x_woe = fea_models_return['x']
+y = fea_models_return['y']
 Fea_choosed_en_name = fea_models_return['Fea_choosed_en_name']
+
 corr_return = sc.filter_feature_by_correlation(x_woe,Fea_choosed_en_name,binning_return)
 
+x = x_woe[corr_return['Fea_choosed_en_name']]
+Lr_return = sc.lr(x,y)
 
 
 
