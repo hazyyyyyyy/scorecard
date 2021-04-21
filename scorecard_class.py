@@ -12,6 +12,8 @@ from sklearn import preprocessing
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from statsmodels.stats.outliers_influence import variance_inflation_factor 
+from sklearn.metrics import roc_auc_score,roc_curve
+import matplotlib.pyplot as plt
 import statsmodels.api as sm
 import re
 import math
@@ -246,6 +248,20 @@ class ScoreCard:
 
         return binning_return
 
+    def orig_2_woe(self, binning_return):
+        x_split_points = binning_return['x_split_points']
+        woe_list = binning_return['woe_list']
+        
+        x, y, x_types = self.transform_discrete()
+        # 1. Transform Datasets into WOE bin
+        for thisFea in range(0, len(x.columns)):
+            thisFea_split = x_split_points[thisFea]
+            thisFea_woe = woe_list[thisFea]
+            for j in range(0, len(thisFea_split)-1): # loop stop at 2nd last element
+                x_thisFea_thisBox = np.where( (x.iloc[:, thisFea]>thisFea_split[j]) & (x.iloc[:, thisFea]<=thisFea_split[j+1]) )[0]
+                x.iloc[x_thisFea_thisBox, thisFea] = thisFea_woe[j]
+        return x
+        
     def filter_feature_by_3_models(self, binning_return,choose_2=True,Lasso_threshold = 0.01,RF_threshold = 0.001,IV_threshold = 0.1):
         '''
         binning_return:woe分箱的返回字典
@@ -259,19 +275,24 @@ class ScoreCard:
         转换数据原值为对应区间的woe值，
         然后用三个模型根据阈值进行筛选
         '''
-        x_split_points = binning_return['x_split_points']
-        woe_list = binning_return['woe_list']
+        
+        
+        #x_split_points = binning_return['x_split_points']
+        #woe_list = binning_return['woe_list']
         IV_tot_list = binning_return['IV_tot_list']
         
         x, y, x_types = self.transform_discrete()
         # 1. Transform Datasets into WOE bin
+        '''
         for thisFea in range(0, len(x.columns)):
             thisFea_split = x_split_points[thisFea]
             thisFea_woe = woe_list[thisFea]
             for j in range(0, len(thisFea_split)-1): # loop stop at 2nd last element
                 x_thisFea_thisBox = np.where( (x.iloc[:, thisFea]>thisFea_split[j]) & (x.iloc[:, thisFea]<=thisFea_split[j+1]) )[0]
                 x.iloc[x_thisFea_thisBox, thisFea] = thisFea_woe[j]
-                                
+        '''
+        x = self.orig_2_woe(binning_return)
+        
         # 2. Calculate Feature Importance by LASSO
         x_scaled = preprocessing.scale(x)    
         Logit_Lasso = LogisticRegression(penalty='l1', solver='liblinear', C=0.3)
@@ -408,7 +429,40 @@ class ScoreCard:
         else:
             return {}
         
-        #def ks(self):
+    def auc_ks(self, Lr_model, x, y_true):
+        y_pred = Lr_model.predict_proba(x)
+        
+        y_0=list(y_pred[:,1])
+        fpr,tpr,thresholds=roc_curve(y_true,y_0)  #计算fpr,tpr,thresholds
+        auc=roc_auc_score(y_true,y_0) #计算auc
+        print('auc为',auc)
+        
+        #画曲线图
+        plt.figure()
+        plt.plot(fpr,tpr)
+        plt.title('$ROC curve$')
+        plt.show()
+         
+        #计算ks
+        KS_max=0
+        best_thr=0
+        for i in range(len(fpr)):
+            if(i==0):
+                KS_max=tpr[i]-fpr[i]
+                best_thr=thresholds[i]
+            elif (tpr[i]-fpr[i]>KS_max):
+                KS_max = tpr[i] - fpr[i]
+                best_thr = thresholds[i]
+        
+        print('最大KS为：',KS_max)
+        print('最佳阈值为：',best_thr)
+        auc_ks_return = {'auc':auc,
+                         'ks':KS_max,
+                         'y_pred':y_pred,
+                         'fpr':fpr,
+                         'tpr':tpr}
+        
+        return auc_ks_return
             
         
         # def create_scorecard(self,x, y, point0 = 600,odds0 = 0.05,PDO = 40):

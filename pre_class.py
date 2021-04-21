@@ -69,19 +69,37 @@ Y = y_train
 
 #%%
 
+# 评分卡对象
 sc = ScoreCard(X,Y)
+sc_test = ScoreCard(x_test, y_test)
+
+# woe分箱
 binning_return = sc.woe_tree()
 print(binning_return['box_num_list'].apply(lambda x:np.sum(x)).unique())
 
+# 用三个模型过滤特征
 fea_models_return = sc.filter_feature_by_3_models(binning_return)
 x_woe = fea_models_return['x']
 y = fea_models_return['y']
 Fea_choosed_en_name = fea_models_return['Fea_choosed_en_name']
 
-corr_return = sc.filter_feature_by_correlation(x_woe,Fea_choosed_en_name,binning_return)
+x_test_woe = sc_test.orig_2_woe(binning_return)
 
+# 用共线性过滤特征
+corr_return = sc.filter_feature_by_correlation(x_woe,Fea_choosed_en_name,binning_return)
 x = x_woe[corr_return['Fea_choosed_en_name']]
+
+x_test_woe = x_test_woe[corr_return['Fea_choosed_en_name']]
+
+# lr建模
 Lr_return = sc.lr(x,y)
+
+# ks
+print('-------训练集-------')
+auc_ks_return = sc.auc_ks(Lr_return['model'], x, y)
+print('-------测试集-------')
+auc_ks_return_test = sc_test.auc_ks(Lr_return['model'], x_test_woe, y_test.reset_index(drop=True))
+
 
 
 
