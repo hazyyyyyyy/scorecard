@@ -142,7 +142,7 @@ class ScoreCard:
         
         return IV_tot, IV, woe, bond, box_num, bad_rate
 
-    def woe_tree(self, min_elem_per_box_ratio=0.05, max_box_num=5, tolerance_despite_nan=0):
+    def woe_tree(self, min_elem_per_box_ratio=0.05, max_box_num=5, tolerance_despite_nan=0, random_seed=None):
         '''
             min_elem_per_box_ratio: 最小每箱数据条数的比例
             max_box_num: 最多箱数
@@ -183,7 +183,7 @@ class ScoreCard:
                 this_y = this_y.values.reshape(-1, 1)
                 
                 # 单列决策树拟合
-                groupdt = tree.DecisionTreeClassifier(criterion='entropy', max_depth=4, min_samples_leaf=min_woe_boxing_num, max_leaf_nodes=max_bin_num)
+                groupdt = tree.DecisionTreeClassifier(criterion='entropy', max_depth=4, min_samples_leaf=min_woe_boxing_num, max_leaf_nodes=max_bin_num, random_state=random_seed)
                 groupdt.fit(this_x, this_y)
                 
                 # 抽取决策树分箱后的数据
@@ -381,9 +381,8 @@ class ScoreCard:
                 
         vif = pd.Series(vif, index = Fea_choosed_en_name)
         
-        high_VIF = np.where(vif>VIF_threshold)[0]
-        for i in range(0, len(high_VIF)):
-            Fea_choosed_en_name.remove( Fea_choosed_en_name[high_VIF[i]] )
+        keep_VIF = np.where(vif<VIF_threshold)[0]
+        Fea_choosed_en_name = np.array(Fea_choosed_en_name)[keep_VIF].tolist()
         corr_return = {'Fea_choosed_by_pearson':Fea_choosed_by_pearson,
                        'corrcoef_matrix':corrcoef_matrix,
                        'Fea_choosed_en_name':Fea_choosed_en_name}
