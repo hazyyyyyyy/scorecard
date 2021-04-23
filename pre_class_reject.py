@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from scorecard_class import ScoreCard
+from tqdm import tqdm
 
 random_seed = 7
 # from sklearn import tree
@@ -132,61 +133,156 @@ print('-------训练集-------')
 auc_ks_return = sc.auc_ks(Lr_return['model'], x, y)
 print('-------测试集-------')
 auc_ks_return_test = sc_test.auc_ks(Lr_return['model'], x_test_woe, y_test.reset_index(drop=True))
-print('-------拒绝集-------')
+print('-------拒绝集(真实)-------')
 auc_ks_return_reject = sc_reject.auc_ks(Lr_return['model'], x_reject_woe, Reject_Y)
 
-#%%
-'''
-展开法-简单展开法（硬截断 hard-cutoff）：
-step 1. 构建 KGB 模型，并对全量样本打分，得到 P(Good) 。
-step 2. 将拒绝样本按 P(Good) 降序排列，设置 cutoff 。根据业务经验，
-        比如拒绝样本的 bad rate 是放贷样本的2～4倍，从而结合拒绝样本量计算出 cutoff。
-step 3. 高于 cutoff 的拒绝样本标记为 good ，反之标记为 bad 。
-step 4. 利用组合样本构建 AGB 模型。
-'''
+#%% 各种推断法
 
-def cutoff(ctff, auc_ks_return_reject):
+class InferReject:
     '''
-    函数解释：
-        给定一个ctff，返回在该cutoff下，给定预测结果的bad_rate
+        Accept_Data : DF
+            第一列是Accept_Y
+        Reject_Data : DF
+            第一列是Reject_Y
+        reject : dict
+            auc_ks_return_reject
     '''
-    cutoff = float(ctff)
-    y_pred_reject = auc_ks_return_reject['y_pred']
-    
-    y_pred_reject = pd.DataFrame(y_pred_reject, columns=['prob_0', 'prob_1'])
-    y_pred_reject = pd.concat([y_pred_reject, pd.DataFrame(np.zeros([y_pred_reject.shape[0],]), columns=['pred'])], axis=1)
-    
-    def get_result(x):
-        if x>cutoff:
-            return 1
-        else:
-            return 0
+    def __init__(self, Accept_Data, Reject_Data, reject):        
+        self.Accept = Accept_Data
+        self.Reject = Reject_Data
+        self.Accept_Y = self.Accept.iloc[:,0]
+        self.Reject_Y = self.Reject.iloc[:,0]
+        self.Accept = self.Accept.iloc[:,1:]
+        self.Reject = self.Reject.iloc[:,1:]
         
-    y_pred_reject['pred'] = y_pred_reject['prob_1'].apply(lambda x:get_result(x))
-    bad_rate = y_pred_reject['pred'].value_counts()[1]/y_pred_reject['pred'].value_counts()[0]
+        # self.accept_data = Accept_Data
+        # self.reject_data = Reject_Data
+        self.reject_return = reject
+        
+    def hard_cutoff(self, ideal_bad_rate=3):
+        '''
+        展开法-简单展开法（硬截断 hard-cutoff）：
+        step 1. 构建 KGB 模型，并对全量样本打分，得到 P(Good) 。
+        step 2. 将拒绝样本按 P(Good) 降序排列，设置 cutoff 。根据业务经验，
+                比如拒绝样本的 bad rate 是放贷样本的2～4倍，从而结合拒绝样本量计算出 cutoff。
+        step 3. 高于 cutoff 的拒绝样本标记为 good ，反之标记为 bad 。
+        step 4. 利用组合样本构建 AGB 模型。
+        
+        tips: 实际使用中，尤其是再bad样本很少的情况下，也可以只取出Reject预测分数低于20%的作为infer_bad，
+              然后再建AGB。剩下高于20%的作为灰色样本，不予考虑
+        return: performance_return
+        '''
+        # step 1: 得到KGB预测的返回
+        Accept = self.Accept
+        Reject = self.Reject
+        Accept_Y = self.Accept_Y
+        Reject_Y = self.Reject_Y
+        auc_ks_return_reject = self.reject_return
+        
+        # step 2: 求cutoff
+        cutoff_range = np.arange(0.40,0.60,0.01)
+
+        min_err = np.inf # 最小误差(某个cutoff下，预测的reject坏客户率与3,即Accept坏客户率的3倍,的差值)
+        min_err_cutoff = 0 # 最小误差时的cutoff
+        min_err_bad_rate = 0 # 最小误差时的坏客户率(非常接近3)
+        
+        for i in tqdm(cutoff_range):    
+            ctf_result = self.cutoff(i, auc_ks_return_reject)
+            if np.abs(ctf_result['bad_rate']-ideal_bad_rate) < min_err: #尽可能靠近3
+                print(np.abs(ctf_result['bad_rate']-ideal_bad_rate))
+                min_err = np.abs(ctf_result['bad_rate']-ideal_bad_rate)
+                min_err_cutoff = i
+                min_err_bad_rate = ctf_result['bad_rate']
+
+        # step 3: cutoff函数执行替换y_pred为该cutoff下的label
+        Reject_Y_infer = self.cutoff(min_err_cutoff, auc_ks_return_reject)['y_pred_reject']['pred']
+
+        # step 4: 重新组合样本后，构建AGB模型
+        All_infer = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
+        All_infer_Y = pd.concat([Accept_Y, Reject_Y_infer], axis=0).reset_index(drop=True)
+        
+        x_train_all_infer, x_test_all_infer, y_train_all_infer, y_test_all_infer = train_test_split(All_infer, All_infer_Y,
+                                                            test_size=0.3, random_state=random_seed)
+        
+        # 评分卡对象
+        sc_train_all_infer = ScoreCard(x_train_all_infer, y_train_all_infer)
+        sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
+        
+        performance_return = self.get_performance(sc_train_all_infer, sc_test_all_infer)
+                        
+        return performance_return
+       
     
-    result = {'y_pred_reject':y_pred_reject, 'bad_rate':bad_rate}
+    '''
+    以下为通用函数
+    '''
     
-    return result
+    def cutoff(self, ctff, auc_ks_return_reject):
+        '''
+        函数解释：
+            给定一个float(ctff)和一个预测返回的return，
+            返回在该cutoff下，给定预测结果，和 bad_rate
+        '''
+        cutoff = float(ctff)
+        y_pred_reject = auc_ks_return_reject['y_pred']
+        
+        y_pred_reject = pd.DataFrame(y_pred_reject, columns=['prob_0', 'prob_1'])
+        y_pred_reject = pd.concat([y_pred_reject, pd.DataFrame(np.zeros([y_pred_reject.shape[0],]), columns=['pred'])], axis=1)
+        
+        def get_result(x):
+            if x>cutoff:
+                return 1
+            else:
+                return 0
+            
+        y_pred_reject['pred'] = y_pred_reject['prob_1'].apply(lambda x:get_result(x))
+        bad_rate = y_pred_reject['pred'].value_counts()[1]/y_pred_reject['pred'].value_counts()[0]
+        
+        result = {'y_pred_reject':y_pred_reject, 'bad_rate':bad_rate}
+        
+        return result
+    
+    def get_performance(self, train_card, test_card):
+        '''
+        函数解释：
+            给定train, test的评分卡对象，输出预测表现，返回两个的auc_ks_return
+        '''
+        
+        # woe分箱
+        binning_return_infer = train_card.woe_tree(random_seed=random_seed)
+        
+        # 用三个模型过滤特征
+        fea_models_return_infer = train_card.filter_feature_by_3_models(binning_return_infer)
+        x_woe_infer = fea_models_return_infer['x']
+        y_infer = fea_models_return_infer['y']
+        Fea_choosed_en_name_infer = fea_models_return_infer['Fea_choosed_en_name']
+        
+        x_test_woe_infer = test_card.orig_2_woe(binning_return_infer)
+        
+        # 用共线性过滤特征
+        corr_return_infer = train_card.filter_feature_by_correlation(x_woe_infer,Fea_choosed_en_name_infer,binning_return_infer)
+        x_infer = x_woe_infer[corr_return_infer['Fea_choosed_en_name']]
+        
+        x_test_woe_infer = x_test_woe_infer[corr_return_infer['Fea_choosed_en_name']]
+        
+        # lr建模
+        Lr_return_infer = train_card.lr(x_infer,y_infer)
+        
+        # ks
+        print('-------训练集-------')
+        auc_ks_return_infer = train_card.auc_ks(Lr_return_infer['model'], x_infer, y_infer)
+        print('-------测试集-------')
+        auc_ks_return_test_infer = test_card.auc_ks(Lr_return_infer['model'], x_test_woe_infer, test_card.orig_y.reset_index(drop=True))
+    
+        performance_return = {'Lr_return':Lr_return_infer,
+                              'auc_ks_return_infer': auc_ks_return_infer,
+                              'auc_ks_return_test_infer':auc_ks_return_test_infer}
+        
+        return performance_return
 
 
-# cutoff=0.5时，bad_rate=2.4248455730954017
 
-cutoff_range = np.arange(0.40,0.50,0.01)
-
-min_err = np.inf
-min_err_cutoff = 0
-min_err_bad_rate = 0
-
-for i in cutoff_range:    
-    ctf_result = cutoff(i, auc_ks_return_reject)
-    if np.abs(ctf_result['bad_rate']-3) < min_err:
-        print(np.abs(ctf_result['bad_rate']-3))
-        min_err = np.abs(ctf_result['bad_rate']-3)
-        min_err_cutoff = i
-        min_err_bad_rate = ctf_result['bad_rate']
-
-Reject_Y_infer = cutoff(min_err_cutoff, auc_ks_return_reject)['y_pred_reject']['pred']
+ir = InferReject(pd.concat([Accept_Y,Accept],axis=1), pd.concat([Reject_Y,Reject],axis=1), auc_ks_return_reject)
 
 
 
@@ -195,6 +291,17 @@ Reject_Y_infer = cutoff(min_err_cutoff, auc_ks_return_reject)['y_pred_reject']['
 
 
 
+
+
+
+
+'''
+展开法-模糊展开法
+step 1. 构建 KGB 模型，并对拒绝样本打分，得到 P(Good) 和 P(Bad) 。
+step 2. 将每条拒绝样本复制为不同类别，不同权重的两条：
+        一条标记为good ，权重为 P(Good) ；另一条标记为 bad ，权重为 P(Bad) 。
+step 3. 利用变换后的拒绝样本和放贷已知好坏样本（类别不变，权重设为1）建立 AGB 模型。
+'''
 
 
 
