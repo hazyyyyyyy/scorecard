@@ -259,6 +259,20 @@ class InferReject:
         
         return performance_return
     
+    
+    def reweighting(self):
+        '''
+        重新加权法并没有把拒绝样本加入建模，只是调整了放贷好坏样本的权重。操作步骤为：
+
+        step 1. 构建 KGB 模型，并对全量样本打分，得到 p(Good) 。
+        step 2. 将全量样本按 p(Good) 降序排列，分箱统计每箱中的放贷和拒绝样本数。
+        step 3. 计算每个分箱中放贷好坏样本的权重：
+        Weight = (Reject_i+Accept_i)/Accept_i = (Reject_i+Good_i+Bad_i)/(Good_i+Bad_i)
+        step 4. 引入样本权重，利用放贷好坏样本重新构建 KGB 模型。
+        '''
+        
+        return
+    
     '''
     以下为通用函数
     '''
