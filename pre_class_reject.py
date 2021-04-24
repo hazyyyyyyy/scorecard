@@ -161,6 +161,7 @@ class InferReject:
         
     def hard_cutoff(self, ideal_bad_rate=3):
         '''
+        ideal_bad_rate: 目标坏客户率，默认3
         展开法-简单展开法（硬截断 hard-cutoff）：
         step 1. 构建 KGB 模型，并对全量样本打分，得到 P(Good) 。
         step 2. 将拒绝样本按 P(Good) 降序排列，设置 cutoff 。根据业务经验，
@@ -212,6 +213,51 @@ class InferReject:
                         
         return performance_return
        
+    def fuzzy_augmentation(self):
+        '''
+        展开法-模糊展开法
+        step 1. 构建 KGB 模型，并对拒绝样本打分，得到 P(Good) 和 P(Bad) 。
+        step 2. 将每条拒绝样本复制为不同类别，不同权重的两条：
+                一条标记为good ，权重为 P(Good) ；另一条标记为 bad ，权重为 P(Bad) 。
+        step 3. 利用变换后的拒绝样本和放贷已知好坏样本（类别不变，权重设为1）建立 AGB 模型。
+        '''
+        # step 1: 得到KGB预测的返回
+        Accept = self.Accept
+        Reject = self.Reject
+        Accept_Y = self.Accept_Y
+        Reject_Y = self.Reject_Y
+        auc_ks_return_reject = self.reject_return
+        
+        # step 2: 
+        y_pred = auc_ks_return_reject['y_pred']
+        
+        Reject_0 = Reject.copy()
+        for i in tqdm(range(0, Reject_0.shape[0])):
+            Reject_0.iloc[i,:] = Reject_0.iloc[i,:].apply(lambda x: x*y_pred[i,0])
+        Reject_0_Y = pd.Series(np.zeros(Reject_0.shape[0]), name='cust_tag')
+        
+        Reject_1 = Reject.copy()
+        for i in tqdm(range(0, Reject_1.shape[0])):
+            Reject_1.iloc[i,:] = Reject_1.iloc[i,:].apply(lambda x: x*y_pred[i,1])
+        Reject_1_Y = pd.Series(np.ones(Reject_0.shape[0]), name='cust_tag')
+        
+        Reject_new = pd.concat([Reject_0, Reject_1], axis=0)
+        Reject_new_Y = pd.concat([Reject_0_Y, Reject_1_Y], axis=0)
+        
+        # step 3: 合并数据，建立AGB模型
+        All = pd.concat([Accept, Reject_new], axis=0)
+        All_Y = pd.concat([Accept_Y, Reject_new_Y], axis=0)
+        
+        x_train_all_infer, x_test_all_infer, y_train_all_infer, y_test_all_infer = \
+                            train_test_split(All, All_Y, test_size=0.3, random_state=random_seed)
+        
+        # 评分卡对象
+        sc_train_all_infer = ScoreCard(x_train_all_infer, y_train_all_infer)
+        sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
+        
+        performance_return = self.get_performance(sc_train_all_infer, sc_test_all_infer)
+        
+        return performance_return
     
     '''
     以下为通用函数
@@ -281,27 +327,28 @@ class InferReject:
         return performance_return
 
 
+# 建卡对象是为了取得woe替换的原数据
+Accept_sc = ScoreCard(Accept, Accept_Y)
+Reject_sc = ScoreCard(Reject, Reject_Y)
 
-ir = InferReject(pd.concat([Accept_Y,Accept],axis=1), pd.concat([Reject_Y,Reject],axis=1), auc_ks_return_reject)
+Accept_woe = Accept_sc.orig_2_woe(binning_return)
+Reject_woe = Reject_sc.orig_2_woe(binning_return)
+
+ir = InferReject(pd.concat([Accept_Y,Accept_woe],axis=1), pd.concat([Reject_Y,Reject_woe],axis=1), auc_ks_return_reject)
+
+hard_cutoff_performance = ir.hard_cutoff()
+fuzzy_augmentation_performance = ir.fuzzy_augmentation()
+
+
+
+
+        
 
 
 
 
 
 
-
-
-
-
-
-
-'''
-展开法-模糊展开法
-step 1. 构建 KGB 模型，并对拒绝样本打分，得到 P(Good) 和 P(Bad) 。
-step 2. 将每条拒绝样本复制为不同类别，不同权重的两条：
-        一条标记为good ，权重为 P(Good) ；另一条标记为 bad ，权重为 P(Bad) 。
-step 3. 利用变换后的拒绝样本和放贷已知好坏样本（类别不变，权重设为1）建立 AGB 模型。
-'''
 
 
 
