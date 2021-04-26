@@ -19,9 +19,14 @@ import re
 import math
 
 class ScoreCard:
+    
+    '''
+    以下是实例函数，用于转换原数据中的类别变量为数值变量
+    '''
     def __init__(self, orig_x, orig_y):
         self.orig_x = orig_x
         self.orig_y = orig_y
+    
     def transform_discrete(self): #按照bad_rate转换类别型变量为数值
         x = self.orig_x.copy()
         y = self.orig_y.copy()
@@ -76,9 +81,63 @@ class ScoreCard:
         x_category_transform.reset_index(drop=True, inplace=True)
         x_num.reset_index(drop=True, inplace=True)
         x_new = pd.concat([x_category_transform, x_num], axis=1)
-        return x_new, y, x_types
+        
+        rules = {'x_category_transfer_rule':x_category_transfer_rule,
+                 'x_category_transfer_rule_featurename':x_category_transfer_rule_featurename}
+        transform_discrete_return = {'x_new':x_new,
+                                     'y':y,
+                                     'x_types':x_types,
+                                     'rules':rules}
+        
+        return transform_discrete_return
 
-    def cal_woe(self, data, dim, bucket_num=10, auto=True, bond_num=[]):
+    '''
+    以下是通用静态函数
+    '''
+    
+    @staticmethod
+    def transform_discrete_static(x_orig, transform_discrete_return):
+        '''
+        x_orig: 原始x(注意static方法不要求y)
+        transform_discrete_return: 给定一个transform_discrete的返回，根据里面的rules转换x_orig
+        return: 返回转换后的x_new
+        '''
+        x = x_orig.copy()
+        # 这是一个df
+        x_category_transfer_rule = transform_discrete_return['rules']['x_category_transfer_rule']
+        # 这是一个Series
+        x_category_transfer_rule_featurename = transform_discrete_return['rules']['x_category_transfer_rule_featurename']
+        
+        x.reset_index(drop=True, inplace=True)
+        x_category = x.loc[:,x_category_transfer_rule_featurename.index]
+        # 类别变量转换后的值
+        x_category_transform = x_category.copy()
+        x_num = x.drop(x_category_transfer_rule_featurename.index, axis=1)
+        
+        for this_fea in x_category_transfer_rule_featurename.index:
+            i = x_category_transfer_rule_featurename[this_fea]
+            this_rule = x_category_transfer_rule[i]
+            this_rule.reset_index(drop=True, inplace=True)
+            this_fea_unique = x_category_transform[this_fea].unique()
+            
+            # 检验unique值是否是规则的子集，如果不是，则直接结束函数
+            if not set(this_fea_unique).issubset( set(x_category_transfer_rule[i]['raw_data']) ):
+                print('unique值非给定规则子集,特征名：',this_fea)
+                return
+            # 检验结束后，开始替换原值
+            for j in range(0, this_rule.shape[0]):
+                this_unique = this_rule.iloc[j,0]
+                this_unique_transform = this_rule.iloc[j,1]
+                x_category_transform[this_fea].iloc[ np.where(x_category_transform[this_fea]==this_unique)[0] ] = this_unique_transform
+        
+        x_category_transform = x_category_transform.astype('int')
+        x_new = pd.concat([x_category_transform, x_num], axis=1)         
+        
+        transform_discrete_static_return = {'x_new':x_new}
+        return transform_discrete_static_return
+    
+    @staticmethod
+    def cal_woe(data, dim, bucket_num=10, auto=True, bond_num=[]):
         m = data.shape[0] 
         X = data[:, dim]
         y = data[:, -1]
@@ -142,14 +201,18 @@ class ScoreCard:
         
         return IV_tot, IV, woe, bond, box_num, bad_rate
 
-    def woe_tree(self, min_elem_per_box_ratio=0.05, max_box_num=5, tolerance_despite_nan=0, random_seed=None):
+    @staticmethod
+    def woe_tree(transform_discrete_return, min_elem_per_box_ratio=0.05, max_box_num=5, tolerance_despite_nan=0, random_seed=None):
         '''
             min_elem_per_box_ratio: 最小每箱数据条数的比例
             max_box_num: 最多箱数
             tolerance_despite_nan: 除了nan最多允许的拐点数量
             return: binning_return字典
         '''
-        x, y, x_types = self.transform_discrete()
+        x = transform_discrete_return['x_new']
+        y = transform_discrete_return['y']
+        x_types = transform_discrete_return['x_types']
+        
         data = pd.concat([x,y], axis=1)
         x_split_points = list(np.zeros([len(x.columns), 1]))
         
@@ -201,7 +264,7 @@ class ScoreCard:
                 
                 # 完成当前分箱后，计算WOE，并检查其单调性，
                 # 如果不单调，max_leaf_nodes-1后重跑
-                IV_tot, IV, woe, bond, box_num, bad_rate = self.cal_woe(np.array(data), i, auto='False', bond_num=pd.Series(final_split_points))
+                IV_tot, IV, woe, bond, box_num, bad_rate = ScoreCard.cal_woe(np.array(data), i, auto='False', bond_num=pd.Series(final_split_points))
 
                 if x_types.loc[x.columns[i]]=='object' or len(woe)<=3:
                     break # 如果是类别型变量，或箱数不高于3，直接跳过下面的矫正
@@ -248,11 +311,16 @@ class ScoreCard:
 
         return binning_return
 
-    def orig_2_woe(self, binning_return):
+    @staticmethod
+    def orig_2_woe(x_new, binning_return):
         x_split_points = binning_return['x_split_points']
         woe_list = binning_return['woe_list']
+        x = x_new.copy()
         
-        x, y, x_types = self.transform_discrete()
+        # x = transform_discrete_return['x_new']
+        # y = transform_discrete_return['y']
+        # x_types = transform_discrete_return['x_types']
+        
         # 1. Transform Datasets into WOE bin
         for thisFea in range(0, len(x.columns)):
             thisFea_split = x_split_points[thisFea]
@@ -262,7 +330,8 @@ class ScoreCard:
                 x.iloc[x_thisFea_thisBox, thisFea] = thisFea_woe[j]
         return x
         
-    def filter_feature_by_3_models(self, binning_return,choose_2=True,Lasso_threshold = 0.01,RF_threshold = 0.001,IV_threshold = 0.1):
+    @staticmethod
+    def filter_feature_by_3_models(transform_discrete_return, binning_return,choose_2=True,Lasso_threshold = 0.01,RF_threshold = 0.001,IV_threshold = 0.1):
         '''
         binning_return:woe分箱的返回字典
         choose_2:True-被至少两个模型选中的变量；False-被三个模型均选中多个变量
@@ -276,12 +345,14 @@ class ScoreCard:
         然后用三个模型根据阈值进行筛选
         '''
         
-        
         #x_split_points = binning_return['x_split_points']
         #woe_list = binning_return['woe_list']
         IV_tot_list = binning_return['IV_tot_list']
         
-        x, y, x_types = self.transform_discrete()
+        x_new = transform_discrete_return['x_new']
+        y = transform_discrete_return['y']
+        x_types = transform_discrete_return['x_types']
+        
         # 1. Transform Datasets into WOE bin
         '''
         for thisFea in range(0, len(x.columns)):
@@ -291,7 +362,7 @@ class ScoreCard:
                 x_thisFea_thisBox = np.where( (x.iloc[:, thisFea]>thisFea_split[j]) & (x.iloc[:, thisFea]<=thisFea_split[j+1]) )[0]
                 x.iloc[x_thisFea_thisBox, thisFea] = thisFea_woe[j]
         '''
-        x = self.orig_2_woe(binning_return)
+        x = ScoreCard.orig_2_woe(x_new, binning_return)
         
         # 2. Calculate Feature Importance by LASSO
         x_scaled = preprocessing.scale(x)    
@@ -340,7 +411,8 @@ class ScoreCard:
 
         return fea_models_return
     
-    def filter_feature_by_correlation(self,x_woe,Fea_choosed,binning_return,corrcoef_threshold = 0.4,VIF_threshold = 10):
+    @staticmethod
+    def filter_feature_by_correlation(x_woe,Fea_choosed,binning_return,corrcoef_threshold = 0.4,VIF_threshold = 10):
         '''
         x_woe: woe替换后的数据（filter_feature_by_3_models的第一份返回值）
         Fea_choosed: 选中的特征（filter_feature_by_3_models的第二份返回值）
@@ -388,19 +460,22 @@ class ScoreCard:
                        'Fea_choosed_en_name':Fea_choosed_en_name}
         return corr_return
 
-    def rfe(self):
+    @staticmethod
+    def rfe():
         '''
         空函数，还没做
         '''
         return
     
-    def stepwise_ks(self):
+    @staticmethod
+    def stepwise_ks():
         '''
         空函数，还没做
         '''
         return
     
-    def lr(self, x, y, default=True):
+    @staticmethod
+    def lr(x, y, default=True):
         '''
         x: x_woe
         y: y
@@ -428,7 +503,8 @@ class ScoreCard:
         else:
             return {}
         
-    def auc_ks(self, Lr_model, x, y_true):
+    @staticmethod
+    def auc_ks(Lr_model, x, y_true):
         y_pred = Lr_model.predict_proba(x)
         
         y_0=list(y_pred[:,1])
@@ -463,54 +539,54 @@ class ScoreCard:
         
         return auc_ks_return
             
+    
+    # def create_scorecard(self,x, y, point0 = 600,odds0 = 0.05,PDO = 40):
+    #     '''
+    #     参数含义： odds0=bad_rate/good_rate=0.05时，point0=600；odds*2时，point变化值为PDO=40
+    #     '''
+    #     # 根据给定基准值，求参数A, B以及初始分数score0
+    #     # 公式：Point = A - B * log(odds)
+    #     B = PDO/math.log(2)
+    #     A = point0+B*math.log(odds0)
+    #     score0=A-B*coef_intercept #初始分数
         
-        # def create_scorecard(self,x, y, point0 = 600,odds0 = 0.05,PDO = 40):
-        #     '''
-        #     参数含义： odds0=bad_rate/good_rate=0.05时，point0=600；odds*2时，point变化值为PDO=40
-        #     '''
-        #     # 根据给定基准值，求参数A, B以及初始分数score0
-        #     # 公式：Point = A - B * log(odds)
-        #     B = PDO/math.log(2)
-        #     A = point0+B*math.log(odds0)
-        #     score0=A-B*coef_intercept #初始分数
-            
-        #     # 初始化评分卡
-        #     chosen_feature_num = x.shape[1]
-        #     ScoreCard = list(np.zeros([chosen_feature_num,]))
-        #     # 变量每一分箱区间的分数 = -该段woe值*该变量的逻辑回归系数*评分卡参数B
-            
-        #     for i in range(0, chosen_feature_num):
-        #         this_Fea = chosen_feature_final[i]
-        #         this_FeaType = x_train_types.loc[this_Fea]
-        #         this_Coef = coef_Lr[i]
-        #         this_SplitPoint = x_split_points.loc[this_Fea]
-        #         this_WOE = woe_list.loc[this_Fea]
-        #         this_SplitNum = len(this_SplitPoint)-1
-                
-        #         this_ScoreCard = pd.DataFrame(np.zeros([this_SplitNum, 2]))
-                
-        #         if this_FeaType=='float64' or this_FeaType=='int64':
-        #             for j in range(0, this_SplitNum):
-        #                 if j == this_SplitNum-1:
-        #                     this_ScoreCard.iloc[j,0]='('+str(this_SplitPoint[j])+','+str(this_SplitPoint[j+1])+')'
-        #                 else:
-        #                     this_ScoreCard.iloc[j,0]='('+str(this_SplitPoint[j])+','+str(this_SplitPoint[j+1])+']'
-        #                 this_ScoreCard.iloc[j,1] = -this_WOE[j]*this_Coef*B
-                    
-        #         else:
-        #             this_TranRule = x_train_category_tranRules[ x_train_category_tranRules_feaName.loc[this_Fea] ]
-                    
-        #             for j in range(0, this_SplitNum):
-        #                 this_Bin_Raw = this_TranRule.iloc[ np.where((this_TranRule.loc[:, 'Transform data']>this_SplitPoint[j])&(this_TranRule.loc[:, 'Transform data']<=this_SplitPoint[j+1]))[0], 0 ]
-                        
-        #                 this_ScoreCard.iloc[j, 0] = this_Bin_Raw.iloc[0]
-        #                 for k in range(1, len(this_Bin_Raw)):
-        #                     this_ScoreCard.iloc[j,0] = this_ScoreCard.iloc[j,0] + ', ' + this_Bin_Raw.iloc[k]
-                        
-        #                 this_ScoreCard.iloc[j, 1] = -this_WOE[j]*this_Coef*B
-            
-        #         ScoreCard[i] = this_ScoreCard
+    #     # 初始化评分卡
+    #     chosen_feature_num = x.shape[1]
+    #     ScoreCard = list(np.zeros([chosen_feature_num,]))
+    #     # 变量每一分箱区间的分数 = -该段woe值*该变量的逻辑回归系数*评分卡参数B
         
+    #     for i in range(0, chosen_feature_num):
+    #         this_Fea = chosen_feature_final[i]
+    #         this_FeaType = x_train_types.loc[this_Fea]
+    #         this_Coef = coef_Lr[i]
+    #         this_SplitPoint = x_split_points.loc[this_Fea]
+    #         this_WOE = woe_list.loc[this_Fea]
+    #         this_SplitNum = len(this_SplitPoint)-1
+            
+    #         this_ScoreCard = pd.DataFrame(np.zeros([this_SplitNum, 2]))
+            
+    #         if this_FeaType=='float64' or this_FeaType=='int64':
+    #             for j in range(0, this_SplitNum):
+    #                 if j == this_SplitNum-1:
+    #                     this_ScoreCard.iloc[j,0]='('+str(this_SplitPoint[j])+','+str(this_SplitPoint[j+1])+')'
+    #                 else:
+    #                     this_ScoreCard.iloc[j,0]='('+str(this_SplitPoint[j])+','+str(this_SplitPoint[j+1])+']'
+    #                 this_ScoreCard.iloc[j,1] = -this_WOE[j]*this_Coef*B
+                
+    #         else:
+    #             this_TranRule = x_train_category_tranRules[ x_train_category_tranRules_feaName.loc[this_Fea] ]
+                
+    #             for j in range(0, this_SplitNum):
+    #                 this_Bin_Raw = this_TranRule.iloc[ np.where((this_TranRule.loc[:, 'Transform data']>this_SplitPoint[j])&(this_TranRule.loc[:, 'Transform data']<=this_SplitPoint[j+1]))[0], 0 ]
+                    
+    #                 this_ScoreCard.iloc[j, 0] = this_Bin_Raw.iloc[0]
+    #                 for k in range(1, len(this_Bin_Raw)):
+    #                     this_ScoreCard.iloc[j,0] = this_ScoreCard.iloc[j,0] + ', ' + this_Bin_Raw.iloc[k]
+                    
+    #                 this_ScoreCard.iloc[j, 1] = -this_WOE[j]*this_Coef*B
+        
+    #         ScoreCard[i] = this_ScoreCard
+    
 
 
 

@@ -102,21 +102,29 @@ Y = y_train
 
 # 评分卡对象
 sc = ScoreCard(X,Y)
-sc_test = ScoreCard(x_test, y_test)
-sc_reject = ScoreCard(Reject, Reject_Y)
+#sc_test = ScoreCard(x_test, y_test)
+#sc_reject = ScoreCard(Reject, Reject_Y)
+
+# 转换类别型变量
+sc_transform = sc.transform_discrete()
+sc_test_transform = ScoreCard.transform_discrete_static(x_test, sc_transform)
+sc_reject_transform = ScoreCard.transform_discrete_static(Reject, sc_transform)
 
 # woe分箱
-binning_return = sc.woe_tree(random_seed=random_seed)
+binning_return = ScoreCard.woe_tree(transform_discrete_return=sc_transform,random_seed=random_seed)
 print(binning_return['box_num_list'].apply(lambda x:np.sum(x)).unique())
 
+# binning_return = sc.woe_tree(random_seed=random_seed)
+# print(binning_return['box_num_list'].apply(lambda x:np.sum(x)).unique())
+
 # 用三个模型过滤特征
-fea_models_return = sc.filter_feature_by_3_models(binning_return)
+fea_models_return = ScoreCard.filter_feature_by_3_models(sc_transform,binning_return)
 x_woe = fea_models_return['x']
 y = fea_models_return['y']
 Fea_choosed_en_name = fea_models_return['Fea_choosed_en_name']
 
-x_test_woe = sc_test.orig_2_woe(binning_return)
-x_reject_woe = sc_reject.orig_2_woe(binning_return)
+x_test_woe = ScoreCard.orig_2_woe(sc_test_transform['x_new'], binning_return)
+x_reject_woe = ScoreCard.orig_2_woe(sc_reject_transform['x_new'], binning_return)
 
 # 用共线性过滤特征
 corr_return = sc.filter_feature_by_correlation(x_woe,Fea_choosed_en_name,binning_return)
@@ -130,11 +138,11 @@ Lr_return = sc.lr(x,y)
 
 # ks
 print('-------训练集-------')
-auc_ks_return = sc.auc_ks(Lr_return['model'], x, y)
+auc_ks_return = ScoreCard.auc_ks(Lr_return['model'], x, y)
 print('-------测试集-------')
-auc_ks_return_test = sc_test.auc_ks(Lr_return['model'], x_test_woe, y_test.reset_index(drop=True))
+auc_ks_return_test = ScoreCard.auc_ks(Lr_return['model'], x_test_woe, y_test.reset_index(drop=True))
 print('-------拒绝集(真实)-------')
-auc_ks_return_reject = sc_reject.auc_ks(Lr_return['model'], x_reject_woe, Reject_Y)
+auc_ks_return_reject = ScoreCard.auc_ks(Lr_return['model'], x_reject_woe, Reject_Y)
 
 #%% 各种推断法
 
@@ -147,7 +155,7 @@ class InferReject:
         reject : dict
             auc_ks_return_reject
     '''
-    def __init__(self, Accept_Data, Reject_Data, reject):        
+    def __init__(self, Accept_Data, Reject_Data, KGB_model):        
         self.Accept = Accept_Data
         self.Reject = Reject_Data
         self.Accept_Y = self.Accept.iloc[:,0]
@@ -157,13 +165,13 @@ class InferReject:
         
         # self.accept_data = Accept_Data
         # self.reject_data = Reject_Data
-        self.reject_return = reject
+        self.kgb = KGB_model
         
     def hard_cutoff(self, ideal_bad_rate=3):
         '''
         ideal_bad_rate: 目标坏客户率，默认3
         展开法-简单展开法（硬截断 hard-cutoff）：
-        step 1. 构建 KGB 模型，并对全量样本打分，得到 P(Good) 。
+        step 1. 构建 KGB 模型，并对拒绝样本打分，得到 P(Good) 。
         step 2. 将拒绝样本按 P(Good) 降序排列，设置 cutoff 。根据业务经验，
                 比如拒绝样本的 bad rate 是放贷样本的2～4倍，从而结合拒绝样本量计算出 cutoff。
         step 3. 高于 cutoff 的拒绝样本标记为 good ，反之标记为 bad 。
@@ -177,26 +185,30 @@ class InferReject:
         Accept = self.Accept
         Reject = self.Reject
         Accept_Y = self.Accept_Y
+        # Reject_Y先放在这儿，实际上没有用到，因为实际未知
         Reject_Y = self.Reject_Y
-        auc_ks_return_reject = self.reject_return
+        kgb = self.kgb
+        
+        Reject_y_pred = kgb.predict_proba(Reject)
         
         # step 2: 求cutoff
-        cutoff_range = np.arange(0.40,0.60,0.01)
+        cutoff_range = np.arange(0.30,0.70,0.01)
 
         min_err = np.inf # 最小误差(某个cutoff下，预测的reject坏客户率与3,即Accept坏客户率的3倍,的差值)
         min_err_cutoff = 0 # 最小误差时的cutoff
         min_err_bad_rate = 0 # 最小误差时的坏客户率(非常接近3)
         
         for i in tqdm(cutoff_range):    
-            ctf_result = self.cutoff(i, auc_ks_return_reject)
-            if np.abs(ctf_result['bad_rate']-ideal_bad_rate) < min_err: #尽可能靠近3
+            ctf_result = InferReject.cutoff(i, Reject_y_pred)
+            # 尽可能靠近目标bad_rate
+            if np.abs(ctf_result['bad_rate']-ideal_bad_rate) < min_err:
                 print(np.abs(ctf_result['bad_rate']-ideal_bad_rate))
                 min_err = np.abs(ctf_result['bad_rate']-ideal_bad_rate)
                 min_err_cutoff = i
                 min_err_bad_rate = ctf_result['bad_rate']
 
         # step 3: cutoff函数执行替换y_pred为该cutoff下的label
-        Reject_Y_infer = self.cutoff(min_err_cutoff, auc_ks_return_reject)['y_pred_reject']['pred']
+        Reject_Y_infer = InferReject.cutoff(min_err_cutoff, Reject_y_pred)['y_pred_reject']['pred']
 
         # step 4: 重新组合样本后，构建AGB模型
         All_infer = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
@@ -209,7 +221,7 @@ class InferReject:
         sc_train_all_infer = ScoreCard(x_train_all_infer, y_train_all_infer)
         sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
         
-        performance_return = self.get_performance(sc_train_all_infer, sc_test_all_infer)
+        performance_return = InferReject.get_performance(sc_train_all_infer, sc_test_all_infer)
                         
         return performance_return
        
@@ -226,10 +238,12 @@ class InferReject:
         Reject = self.Reject
         Accept_Y = self.Accept_Y
         Reject_Y = self.Reject_Y
-        auc_ks_return_reject = self.reject_return
+        kgb = self.kgb
+        
+        Reject_y_pred = kgb.predict_proba(Reject)
         
         # step 2: 
-        y_pred = auc_ks_return_reject['y_pred']
+        y_pred = Reject_y_pred
         
         Reject_0 = Reject.copy()
         for i in tqdm(range(0, Reject_0.shape[0])):
@@ -255,12 +269,11 @@ class InferReject:
         sc_train_all_infer = ScoreCard(x_train_all_infer, y_train_all_infer)
         sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
         
-        performance_return = self.get_performance(sc_train_all_infer, sc_test_all_infer)
+        performance_return = InferReject.get_performance(sc_train_all_infer, sc_test_all_infer)
         
         return performance_return
     
-    
-    def reweighting(self):
+    def reweighting(self, box_num=100):
         '''
         重新加权法并没有把拒绝样本加入建模，只是调整了放贷好坏样本的权重。操作步骤为：
 
@@ -270,21 +283,39 @@ class InferReject:
         Weight = (Reject_i+Accept_i)/Accept_i = (Reject_i+Good_i+Bad_i)/(Good_i+Bad_i)
         step 4. 引入样本权重，利用放贷好坏样本重新构建 KGB 模型。
         '''
+        # step 1: 得到KGB的返回
+        Accept = self.Accept
+        Reject = self.Reject
+        Accept_Y = self.Accept_Y
+        Reject_Y = self.Reject_Y
+        kgb = self.kgb
         
+        All = pd.concat([Accept, Reject], axis=0)
+        All_y_pred = kgb.predict_proba(All)[:,1]
+        
+        # step 2: 等频分箱:
+        num_box = np.ceil(All_y_pred.shape[0]/box_num)
+        All_y_pred1 = All_y_pred.copy()
+        All_y_pred1.sort()
+        
+        counts = All_y_pred1.value_counts()
+        for i in range(0, counts.shape[0]):
+            
+            
         return
     
     '''
     以下为通用函数
     '''
-    
-    def cutoff(self, ctff, auc_ks_return_reject):
+    @staticmethod
+    def cutoff(ctff, y_pred):
         '''
         函数解释：
-            给定一个float(ctff)和一个预测返回的return，
+            给定一个float(ctff)和一个预测返回的y_pred，
             返回在该cutoff下，给定预测结果，和 bad_rate
         '''
         cutoff = float(ctff)
-        y_pred_reject = auc_ks_return_reject['y_pred']
+        y_pred_reject = y_pred.copy()
         
         y_pred_reject = pd.DataFrame(y_pred_reject, columns=['prob_0', 'prob_1'])
         y_pred_reject = pd.concat([y_pred_reject, pd.DataFrame(np.zeros([y_pred_reject.shape[0],]), columns=['pred'])], axis=1)
@@ -302,37 +333,39 @@ class InferReject:
         
         return result
     
-    def get_performance(self, train_card, test_card):
+    @staticmethod
+    def get_performance(train_card, test_card):
         '''
         函数解释：
             给定train, test的评分卡对象，输出预测表现，返回两个的auc_ks_return
         '''
         
         # woe分箱
-        binning_return_infer = train_card.woe_tree(random_seed=random_seed)
+        transform_discrete_return = train_card.transform_discrete()
+        binning_return_infer = train_card.woe_tree(transform_discrete_return, random_seed=random_seed)
         
         # 用三个模型过滤特征
-        fea_models_return_infer = train_card.filter_feature_by_3_models(binning_return_infer)
+        fea_models_return_infer = ScoreCard.filter_feature_by_3_models(transform_discrete_return, binning_return_infer)
         x_woe_infer = fea_models_return_infer['x']
         y_infer = fea_models_return_infer['y']
         Fea_choosed_en_name_infer = fea_models_return_infer['Fea_choosed_en_name']
         
-        x_test_woe_infer = test_card.orig_2_woe(binning_return_infer)
+        x_test_woe_infer = ScoreCard.orig_2_woe(test_card.orig_x, binning_return_infer)
         
         # 用共线性过滤特征
-        corr_return_infer = train_card.filter_feature_by_correlation(x_woe_infer,Fea_choosed_en_name_infer,binning_return_infer)
+        corr_return_infer = ScoreCard.filter_feature_by_correlation(x_woe_infer,Fea_choosed_en_name_infer,binning_return_infer)
         x_infer = x_woe_infer[corr_return_infer['Fea_choosed_en_name']]
         
         x_test_woe_infer = x_test_woe_infer[corr_return_infer['Fea_choosed_en_name']]
         
         # lr建模
-        Lr_return_infer = train_card.lr(x_infer,y_infer)
+        Lr_return_infer = ScoreCard.lr(x_infer,y_infer)
         
         # ks
         print('-------训练集-------')
-        auc_ks_return_infer = train_card.auc_ks(Lr_return_infer['model'], x_infer, y_infer)
+        auc_ks_return_infer = ScoreCard.auc_ks(Lr_return_infer['model'], x_infer, y_infer)
         print('-------测试集-------')
-        auc_ks_return_test_infer = test_card.auc_ks(Lr_return_infer['model'], x_test_woe_infer, test_card.orig_y.reset_index(drop=True))
+        auc_ks_return_test_infer = ScoreCard.auc_ks(Lr_return_infer['model'], x_test_woe_infer, test_card.orig_y.reset_index(drop=True))
     
         performance_return = {'Lr_return':Lr_return_infer,
                               'auc_ks_return_infer': auc_ks_return_infer,
@@ -341,14 +374,15 @@ class InferReject:
         return performance_return
 
 
-# 建卡对象是为了取得woe替换的原数据
-Accept_sc = ScoreCard(Accept, Accept_Y)
-Reject_sc = ScoreCard(Reject, Reject_Y)
+# 取得woe替换的原数据
+sc_Accept_transform = ScoreCard.transform_discrete_static(Accept, sc_transform)
 
-Accept_woe = Accept_sc.orig_2_woe(binning_return)
-Reject_woe = Reject_sc.orig_2_woe(binning_return)
+Reject_woe = x_reject_woe.copy()
+Accept_woe = ScoreCard.orig_2_woe(sc_Accept_transform['x_new'], binning_return)
+Accept_woe = Accept_woe.loc[:, Reject_woe.columns]
 
-ir = InferReject(pd.concat([Accept_Y,Accept_woe],axis=1), pd.concat([Reject_Y,Reject_woe],axis=1), auc_ks_return_reject)
+kgb = Lr_return['model']
+ir = InferReject(pd.concat([Accept_Y,Accept_woe],axis=1), pd.concat([Reject_Y,Reject_woe],axis=1), kgb)
 
 hard_cutoff_performance = ir.hard_cutoff()
 fuzzy_augmentation_performance = ir.fuzzy_augmentation()
