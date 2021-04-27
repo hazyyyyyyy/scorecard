@@ -475,19 +475,20 @@ class ScoreCard:
         return
     
     @staticmethod
-    def lr(x, y, default=True):
+    def lr(x, y, **kw):
         '''
         x: x_woe
         y: y
-        default: 默认参数：penalty='l2', c=0.3
+        默认参数：penalty='l2',C=0.3
         return: Lr_return字典。其中model为sklearn的Lr模型对象
         '''
-        if default:
-            Lr= LogisticRegression(penalty='l2',C=0.3)
+        
+        if len(kw)==0:
+            Lr = LogisticRegression(penalty='l2',C=0.3)
             Lr.fit(x, y) 
             
-            coef_Lr=Lr.coef_.transpose()  #提取特征权重
-            coef_intercept=Lr.intercept_  #提取截距
+            coef_Lr = Lr.coef_.transpose()  #提取特征权重
+            coef_intercept = Lr.intercept_  #提取截距
             
             # p test
             logit = sm.Logit(y, x)
@@ -501,7 +502,47 @@ class ScoreCard:
                          'coef_intercept': coef_intercept}
             return Lr_return
         else:
-            return {}
+            # 获取kw参数
+            if 'penalty' in kw.keys():
+                penalty = kw['penalty']
+            else:
+                penalty = 'l2'
+            if 'C' in kw.keys():
+                C = kw['C']
+            else:
+                C = 0.3
+            if 'sample_weight' in kw.keys():
+                sample_weight = kw['sample_weight']
+            else:
+                sample_weight = None
+            if 'class_weight' in kw.keys():
+                class_weight = kw['class_weight']
+            else:
+                class_weight = None
+            if 'solver' in kw.keys():
+                solver = kw['solver']
+            else:
+                solver = 'liblinear'
+                
+            Lr = LogisticRegression(penalty=penalty,C=C,class_weight=class_weight,solver=solver,n_jobs=-1)
+            Lr.fit(x, y, sample_weight=sample_weight) 
+            
+            coef_Lr=Lr.coef_.transpose()  #提取特征权重
+            coef_intercept=Lr.intercept_  #提取截距
+            
+            # p test
+            logit = sm.Logit(y, x)
+            result = logit.fit()
+            print('Parameters: ', result.params)
+            margeff = result.get_margeff(dummy=True)
+            print(margeff.summary())
+            
+            Lr_return = {'model': Lr,
+                         'coef_Lr': coef_Lr,
+                         'coef_intercept': coef_intercept,
+                         'params':kw}
+            
+            return Lr_return
         
     @staticmethod
     def auc_ks(Lr_model, x, y_true):

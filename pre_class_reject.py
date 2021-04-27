@@ -273,7 +273,7 @@ class InferReject:
         
         return performance_return
     
-    def reweighting(self, box_num=100):
+    def reweighting(self, box_num=5):
         '''
         重新加权法并没有把拒绝样本加入建模，只是调整了放贷好坏样本的权重。操作步骤为：
 
@@ -290,19 +290,62 @@ class InferReject:
         Reject_Y = self.Reject_Y
         kgb = self.kgb
         
-        All = pd.concat([Accept, Reject], axis=0)
+        All = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
         All_y_pred = kgb.predict_proba(All)[:,1]
         
-        # step 2: 等频分箱:
-        num_box = np.ceil(All_y_pred.shape[0]/box_num)
-        All_y_pred1 = All_y_pred.copy()
-        All_y_pred1.sort()
+        All_xy = pd.concat([pd.Series(All_y_pred),All], axis=1)
+        Accept_xy = All_xy.iloc[:Accept.shape[0], :]
+        Reject_xy = All_xy.iloc[Accept.shape[0]:, :].reset_index(drop=True)
         
-        counts = All_y_pred1.value_counts()
-        for i in range(0, counts.shape[0]):
+        Accept_xy.insert(0,'weight',pd.Series(np.zeros([Accept_xy.shape[0]])))
+        Reject_xy.insert(0,'weight',pd.Series(np.zeros([Reject_xy.shape[0]])))
+        
+        # step 2,3: 等频分箱: 第一列是权重，第二列是y
+        step = 1/box_num
+        records = pd.DataFrame(np.zeros([box_num,6]), columns=['min', 'max', 'total', 'accept', 'reject', 'weight'])
+        
+        for i in range(0, box_num):
+            this_range_start = i*step
+            this_range_end = (i+1)*step
+
+            this_range_Accept_index = np.where( (Accept_xy.iloc[:,1]>this_range_start)&(Accept_xy.iloc[:,1]<=this_range_end) )[0]
+            this_range_Reject_index = np.where( (Reject_xy.iloc[:,1]>this_range_start)&(Reject_xy.iloc[:,1]<=this_range_end) )[0]
+            this_range_Accept = Accept_xy.iloc[this_range_Accept_index, :]            
+            this_range_Reject = Reject_xy.iloc[this_range_Reject_index, :]            
             
+            this_range_weight = (this_range_Reject.shape[0]+this_range_Accept.shape[0])/this_range_Accept.shape[0]
             
-        return
+            # 写入权重
+            Accept_xy.iloc[this_range_Accept_index, 0] = this_range_weight
+            Reject_xy.iloc[this_range_Reject_index, 0] = this_range_weight
+            
+            # 写入records
+            records.iloc[i,0] = this_range_start
+            records.iloc[i,1] = this_range_end
+            records.iloc[i,2] = this_range_Accept.shape[0]+this_range_Reject.shape[0]
+            records.iloc[i,3] = this_range_Accept.shape[0]
+            records.iloc[i,4] = this_range_Reject.shape[0]
+            records.iloc[i,5] = this_range_weight
+         
+        # step 4: 提取权重，重新建立KGB        
+        
+        x_train_all_infer, x_test_all_infer, y_train_all_infer, y_test_all_infer = \
+                            train_test_split(Accept_xy, Accept_Y, test_size=0.3, random_state=random_seed)
+        x_train_all_infer_weight = x_train_all_infer.iloc[:,0]
+        x_test_all_infer_weight = x_test_all_infer.iloc[:,0]
+        # drop掉weight，y
+        x_train_all_infer.drop(0,axis=1,inplace=True)
+        x_train_all_infer.drop('weight',axis=1,inplace=True)
+        x_test_all_infer.drop(0,axis=1,inplace=True)
+        x_test_all_infer.drop('weight',axis=1,inplace=True)
+        
+        # 评分卡对象
+        sc_train_all_infer = ScoreCard(x_train_all_infer, y_train_all_infer)
+        sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
+        
+        performance_return = InferReject.get_performance(sc_train_all_infer, sc_test_all_infer, sample_weight=x_train_all_infer_weight)
+ 
+        return performance_return
     
     '''
     以下为通用函数
@@ -334,10 +377,10 @@ class InferReject:
         return result
     
     @staticmethod
-    def get_performance(train_card, test_card):
+    def get_performance(train_card, test_card, **kw):
         '''
         函数解释：
-            给定train, test的评分卡对象，输出预测表现，返回两个的auc_ks_return
+            给定train, test的评分卡对象，以及可选择的建模参数，输出预测表现，返回两个的auc_ks_return
         '''
         
         # woe分箱
@@ -359,7 +402,11 @@ class InferReject:
         x_test_woe_infer = x_test_woe_infer[corr_return_infer['Fea_choosed_en_name']]
         
         # lr建模
-        Lr_return_infer = ScoreCard.lr(x_infer,y_infer)
+        # if len(kw)==0:
+        #     Lr_return_infer = ScoreCard.lr(x_infer,y_infer)
+        # else:
+        #     Lr_return_infer = ScoreCard.lr(x_infer,y_infer,kw=kw)
+        Lr_return_infer = ScoreCard.lr(x_infer,y_infer,kw=kw)
         
         # ks
         print('-------训练集-------')
@@ -386,7 +433,7 @@ ir = InferReject(pd.concat([Accept_Y,Accept_woe],axis=1), pd.concat([Reject_Y,Re
 
 hard_cutoff_performance = ir.hard_cutoff()
 fuzzy_augmentation_performance = ir.fuzzy_augmentation()
-
+reweighting_performance = ir.reweighting()
 
 
 
