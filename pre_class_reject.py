@@ -10,7 +10,6 @@ from sklearn.model_selection import train_test_split
 from scorecard_class import ScoreCard
 from tqdm import tqdm
 
-random_seed = 7
 # from sklearn import tree
 # import re
 
@@ -65,23 +64,86 @@ for i in range(0, np.shape(All_Data)[1]): # loop by columns
 
 #%%
 #----------------------- 三. 划分拒绝/放贷样本->对放贷样本划分测试集训练集合 -----------------------#
-# 构造放贷/拒绝样本: 设置IK=3
-# 放贷样本中 1：4000个，0：3000个
-# 拒绝样本中 1：4000个，0：1000个
-Good = All_Data.iloc[np.where(Y==1)[0]]
-Bad = All_Data.iloc[np.where(Y==0)[0]]
 
-Accept_Good = Good.sample(n=4000,axis=0,random_state=random_seed)
-Accept_Bad = Bad.sample(n=3000,axis=0,random_state=random_seed)
+Bad = All_Data.iloc[np.where(Y==1)[0]]
+Good = All_Data.iloc[np.where(Y==0)[0]]
+
+# 给定原始数据好客户数，坏客户数，IK，放贷样本好客户数
+# 返回放贷样本好客户数，坏客户数，拒绝样本好客户数，坏客户数
+def split_Accept_Reject(good_num, bad_num, Accept_Good_num, IK=3):
+    
+    Accept_Bad_num = round( (bad_num*Accept_Good_num) / ((IK*good_num)-(IK-1)*Accept_Good_num) )
+    Reject_Good_num = good_num - Accept_Good_num
+    Reject_Bad_num = bad_num - Accept_Bad_num
+    
+    random_seed = 0
+
+    while(True):
+        Accept_Good = Good.sample(n=Accept_Good_num,axis=0,random_state=random_seed)
+        Accept_Bad = Bad.sample(n=Accept_Bad_num,axis=0,random_state=random_seed)
+        Accept = pd.concat([Accept_Good,Accept_Bad], axis=0)
+        
+        Reject_Good_index = list(set(Good.index.tolist()) - set(Accept.index.tolist()))
+        Reject_Bad_index = list(set(Bad.index.tolist()) - set(Accept.index.tolist()))
+        Reject_Good = Good.filter(Reject_Good_index, axis=0)
+        Reject_Bad = Bad.filter(Reject_Bad_index, axis=0)
+        
+        Reject_all = pd.concat([Reject_Good, Reject_Bad], axis=0)
+        
+        types = pd.Series(Accept.dtypes, dtype='str')
+        category_position = np.where( types=='object' )[0]
+        Accept_category = Accept.iloc[:, category_position]
+        Reject_all_category = Reject_all.iloc[:, category_position]
+        
+        cate_num = len(category_position)
+        flag=0 #标识符，如果循环结束后等于cate_num则break掉while
+        
+        # 检验：Reject中有的类别型变量, Accept中必须有
+        for i in tqdm(range(0, Accept_category.shape[1])):
+            if set(Reject_all_category.iloc[:,i].unique()).issubset( set(Accept_category.iloc[:,i].unique()) ):
+                flag += 1
+        
+        if int(flag) == cate_num:
+            break
+        else:
+            random_seed += 1
+    
+    return Accept_Good_num, Accept_Bad_num, Reject_Good_num, Reject_Bad_num, random_seed
+
+
+# 构造放贷/拒绝样本: 设置IK=3
+Accept_Good_num, Accept_Bad_num, Reject_Good_num, Reject_Bad_num, seed_ar = \
+    split_Accept_Reject(good_num=Good.shape[0], bad_num=Bad.shape[0], Accept_Good_num=2000, IK=3)
+
+Accept_Good = Good.sample(n=Accept_Good_num,axis=0,random_state=seed_ar)
+Accept_Bad = Bad.sample(n=Accept_Bad_num,axis=0,random_state=seed_ar)
 Accept = pd.concat([Accept_Good,Accept_Bad], axis=0)
 Accept_Y = Y.filter(Accept.index, axis=0)
 
 Reject_Good_index = list(set(Good.index.tolist()) - set(Accept.index.tolist()))
 Reject_Bad_index = list(set(Bad.index.tolist()) - set(Accept.index.tolist()))
-Reject_Good_index = Good.filter(Reject_Good_index, axis=0)
-Reject_Bad_index = Bad.filter(Reject_Bad_index, axis=0)
+Reject_Good = Good.filter(Reject_Good_index, axis=0)
+Reject_Bad = Bad.filter(Reject_Bad_index, axis=0)
 
-Reject = pd.concat([Reject_Good_index, Reject_Bad_index], axis=0)
+Reject_all = pd.concat([Reject_Good, Reject_Bad], axis=0)
+Reject_Y_all = Y.filter(Reject_all.index, axis=0)
+
+#拒绝样本等odds比例再次拆分，一部分用于检验拒绝推断效果
+Reject_odds = Reject_Y_all.value_counts()[1]/Reject_Y_all.value_counts()[0]
+Reject_test_good_num = round( Reject_Y_all.value_counts()[0]/2 )
+Reject_test_bad_num = round( Reject_test_good_num*Reject_odds )
+
+Reject_test_Good = Reject_Good.sample(n=Reject_test_good_num,axis=0,random_state=seed_ar)
+Reject_test_Bad = Reject_Bad.sample(n=Reject_test_bad_num,axis=0,random_state=seed_ar)
+Reject_test = pd.concat([Reject_test_Good, Reject_test_Bad], axis=0)
+Reject_test_Y = Y.filter(Reject_test.index, axis=0)
+
+# 取回剩余的Reject
+Reject_Good_index = list(set(Reject_Good.index.tolist()) - set(Reject_test_Good.index.tolist()))
+Reject_Bad_index = list(set(Reject_Bad.index.tolist()) - set(Reject_test_Bad.index.tolist()))
+Reject_Good = Good.filter(Reject_Good_index, axis=0)
+Reject_Bad = Bad.filter(Reject_Bad_index, axis=0)
+Reject = pd.concat([Reject_Good, Reject_Bad], axis=0)
 Reject_Y = Y.filter(Reject.index, axis=0)
 
 #重洗index
@@ -89,12 +151,45 @@ Accept.reset_index(drop=True,inplace=True)
 Accept_Y.reset_index(drop=True,inplace=True)
 Reject.reset_index(drop=True,inplace=True)
 Reject_Y.reset_index(drop=True,inplace=True)
+Reject_test.reset_index(drop=True,inplace=True)
+Reject_test_Y.reset_index(drop=True,inplace=True)
+
 
 print('构造放贷样本中好坏样本比例：\n',Accept_Y.value_counts())
 print('构造拒绝样本中好坏样本比例：\n',Reject_Y.value_counts())
+print('构造拒绝测试样本中好坏样本比例：\n',Reject_test_Y.value_counts())
+
+def find_random_seed(Accept, Accept_Y, test_size=0.3):
+    random_seed = 0
+    types = pd.Series(Accept.dtypes, dtype='str')
+    category_position = np.where( types=='object' )[0]
+    while(True):
+        
+        x_train, x_test, y_train, y_test = train_test_split(Accept, Accept_Y,
+                                                    test_size=test_size, random_state=random_seed)
+
+        x_train_category = x_train.iloc[:, category_position]
+        x_test_category = x_test.iloc[:, category_position]
+        
+        cate_num = len(category_position)
+        flag=0 #标识符，如果循环结束后等于cate_num则break掉while
+        
+        # 检验：Reject中有的类别型变量, Accept中必须有
+        for i in tqdm(range(0, x_train_category.shape[1])):
+            if set(x_test_category.iloc[:,i].unique()).issubset( set(x_train_category.iloc[:,i].unique()) ):
+                flag += 1
+        
+        if int(flag) == cate_num:
+            break
+        else:
+            random_seed += 1
+    return random_seed
+
+test_size=0.3
+random_seed = find_random_seed(Accept, Accept_Y, test_size=test_size)
 
 x_train, x_test, y_train, y_test = train_test_split(Accept, Accept_Y,
-                                                    test_size=0.3, random_state=random_seed)
+                                                    test_size=test_size, random_state=random_seed)
 X = x_train
 Y = y_train
 
@@ -109,6 +204,7 @@ sc = ScoreCard(X,Y)
 sc_transform = sc.transform_discrete()
 sc_test_transform = ScoreCard.transform_discrete_static(x_test, sc_transform)
 sc_reject_transform = ScoreCard.transform_discrete_static(Reject, sc_transform)
+sc_reject_test_transform = ScoreCard.transform_discrete_static(Reject_test, sc_transform)
 
 # woe分箱
 binning_return = ScoreCard.woe_tree(transform_discrete_return=sc_transform,random_seed=random_seed)
@@ -125,6 +221,7 @@ Fea_choosed_en_name = fea_models_return['Fea_choosed_en_name']
 
 x_test_woe = ScoreCard.orig_2_woe(sc_test_transform['x_new'], binning_return)
 x_reject_woe = ScoreCard.orig_2_woe(sc_reject_transform['x_new'], binning_return)
+x_reject_test_woe = ScoreCard.orig_2_woe(sc_reject_test_transform['x_new'], binning_return)
 
 # 用共线性过滤特征
 corr_return = sc.filter_feature_by_correlation(x_woe,Fea_choosed_en_name,binning_return)
@@ -132,6 +229,7 @@ x = x_woe[corr_return['Fea_choosed_en_name']]
 
 x_test_woe = x_test_woe[corr_return['Fea_choosed_en_name']]
 x_reject_woe = x_reject_woe[corr_return['Fea_choosed_en_name']]
+x_reject_test_woe = x_reject_test_woe[corr_return['Fea_choosed_en_name']]
 
 # lr建模
 Lr_return = sc.lr(x,y)
@@ -141,8 +239,10 @@ print('-------训练集-------')
 auc_ks_return = ScoreCard.auc_ks(Lr_return['model'], x, y)
 print('-------测试集-------')
 auc_ks_return_test = ScoreCard.auc_ks(Lr_return['model'], x_test_woe, y_test.reset_index(drop=True))
-print('-------拒绝集(真实)-------')
+print('-------拒绝集(加入推断part)-------')
 auc_ks_return_reject = ScoreCard.auc_ks(Lr_return['model'], x_reject_woe, Reject_Y)
+print('-------拒绝集(独立测试part)-------')
+auc_ks_return_reject_test = ScoreCard.auc_ks(Lr_return['model'], x_reject_test_woe, Reject_Y)
 
 #%% 各种推断法
 
@@ -155,13 +255,16 @@ class InferReject:
         reject : dict
             auc_ks_return_reject
     '''
-    def __init__(self, Accept_Data, Reject_Data, KGB_model):        
+    def __init__(self, Accept_Data, Reject_Data, Reject_test_Data, KGB_model):        
         self.Accept = Accept_Data
         self.Reject = Reject_Data
+        self.Reject_test = Reject_test_Data
         self.Accept_Y = self.Accept.iloc[:,0]
         self.Reject_Y = self.Reject.iloc[:,0]
+        self.Reject_test_Y = self.Reject_test.iloc[:,0]
         self.Accept = self.Accept.iloc[:,1:]
         self.Reject = self.Reject.iloc[:,1:]
+        self.Reject_test = self.Reject_test.iloc[:,1:]
         
         # self.accept_data = Accept_Data
         # self.reject_data = Reject_Data
@@ -184,9 +287,11 @@ class InferReject:
         # step 1: 得到KGB预测的返回
         Accept = self.Accept
         Reject = self.Reject
+        Reject_test = self.Reject_test
         Accept_Y = self.Accept_Y
         # Reject_Y先放在这儿，实际上没有用到，因为实际未知
         Reject_Y = self.Reject_Y
+        Reject_test_Y = self.Reject_test_Y
         kgb = self.kgb
         
         Reject_y_pred = kgb.predict_proba(Reject)
@@ -214,6 +319,7 @@ class InferReject:
         All_infer = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
         All_infer_Y = pd.concat([Accept_Y, Reject_Y_infer], axis=0).reset_index(drop=True)
         
+        '''
         x_train_all_infer, x_test_all_infer, y_train_all_infer, y_test_all_infer = train_test_split(All_infer, All_infer_Y,
                                                             test_size=0.3, random_state=random_seed)
         
@@ -222,7 +328,14 @@ class InferReject:
         sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
         
         performance_return = InferReject.get_performance(sc_train_all_infer, sc_test_all_infer)
-                        
+
+        '''
+        # 评分卡对象
+        sc_All_infer = ScoreCard(All_infer, All_infer_Y)
+        sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
+        
+        performance_return = InferReject.get_performance(sc_All_infer, sc_Reject_test)
+                         
         return performance_return
        
     def fuzzy_augmentation(self):
@@ -236,8 +349,10 @@ class InferReject:
         # step 1: 得到KGB预测的返回
         Accept = self.Accept
         Reject = self.Reject
+        Reject_test = self.Reject_test
         Accept_Y = self.Accept_Y
         Reject_Y = self.Reject_Y
+        Reject_test_Y = self.Reject_test_Y
         kgb = self.kgb
         
         Reject_y_pred = kgb.predict_proba(Reject)
@@ -262,14 +377,22 @@ class InferReject:
         All = pd.concat([Accept, Reject_new], axis=0)
         All_Y = pd.concat([Accept_Y, Reject_new_Y], axis=0)
         
+        '''
         x_train_all_infer, x_test_all_infer, y_train_all_infer, y_test_all_infer = \
                             train_test_split(All, All_Y, test_size=0.3, random_state=random_seed)
+        
         
         # 评分卡对象
         sc_train_all_infer = ScoreCard(x_train_all_infer, y_train_all_infer)
         sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
         
         performance_return = InferReject.get_performance(sc_train_all_infer, sc_test_all_infer)
+        '''
+        # 评分卡对象
+        sc_All_infer = ScoreCard(All, All_Y)
+        sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
+        
+        performance_return = InferReject.get_performance(sc_All_infer, sc_Reject_test)      
         
         return performance_return
     
@@ -286,8 +409,10 @@ class InferReject:
         # step 1: 得到KGB的返回
         Accept = self.Accept
         Reject = self.Reject
+        Reject_test = self.Reject_test
         Accept_Y = self.Accept_Y
         Reject_Y = self.Reject_Y
+        Reject_test_Y = self.Reject_test_Y
         kgb = self.kgb
         
         All = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
@@ -329,23 +454,92 @@ class InferReject:
          
         # step 4: 提取权重，重新建立KGB        
         
-        x_train_all_infer, x_test_all_infer, y_train_all_infer, y_test_all_infer = \
-                            train_test_split(Accept_xy, Accept_Y, test_size=0.3, random_state=random_seed)
-        x_train_all_infer_weight = x_train_all_infer.iloc[:,0]
-        x_test_all_infer_weight = x_test_all_infer.iloc[:,0]
+        Accept_infer_weight = Accept_xy.iloc[:,0]
         # drop掉weight，y
-        x_train_all_infer.drop(0,axis=1,inplace=True)
-        x_train_all_infer.drop('weight',axis=1,inplace=True)
-        x_test_all_infer.drop(0,axis=1,inplace=True)
-        x_test_all_infer.drop('weight',axis=1,inplace=True)
-        
+        Accept_xy.drop(0,axis=1,inplace=True)
+        Accept_xy.drop('weight',axis=1,inplace=True)
+
         # 评分卡对象
-        sc_train_all_infer = ScoreCard(x_train_all_infer, y_train_all_infer)
-        sc_test_all_infer = ScoreCard(x_test_all_infer, y_test_all_infer)
+        sc_Accept_infer = ScoreCard(Accept, Accept_Y)
+        sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
         
-        performance_return = InferReject.get_performance(sc_train_all_infer, sc_test_all_infer, sample_weight=x_train_all_infer_weight)
- 
+        performance_return = InferReject.get_performance(sc_Accept_infer, sc_Reject_test, sample_weight=Accept_infer_weight)      
+        
         return performance_return
+    
+    def extrapolation(self, box_num=5, ideal_bad_rate=3):
+        '''
+        step 1. 构建 KGB 模型，并对全量样本打分 P(Good) 。
+        step 2. 将放贷样本按分数排序后分箱（一般等频），将拒绝样本按相同边界分组。
+        step 3. 对每个分箱，统计放贷样本中的 bad_rate。
+        step 4. 对每个分箱，将放贷样本的 bad_rate 乘以经验风险因子（通常取2～4），
+                得到拒绝样本的期望 bad_rate。
+        step 5. 为达到期望的 bad_rate，随机赋予分箱内的拒绝样本以 bad 和 good 状态。
+                同时，检验整体拒绝样本的 bad_rate 是否是放贷样本的2～4倍。
+        step 6. 利用组合样本构建 AGB 模型。
+        '''
+        
+        Accept = self.Accept
+        Reject = self.Reject
+        Reject_test = self.Reject_test
+        Accept_Y = self.Accept_Y
+        Reject_Y = self.Reject_Y
+        Reject_test_Y = self.Reject_test_Y
+        kgb = self.kgb
+        
+        # step 1: 得到KGB的返回
+        All = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
+        All_y_pred = kgb.predict_proba(All)[:,1]
+        
+        All_xy = pd.concat([pd.Series(All_y_pred),All], axis=1)
+        Accept_xy = All_xy.iloc[:Accept.shape[0], :]
+        Reject_xy = All_xy.iloc[Accept.shape[0]:, :].reset_index(drop=True)        
+        Reject_y_infer = pd.Series(np.ones([Reject_xy.shape[0]]),name='infer_y')
+        Reject_y_infer = Reject_y_infer+1 #用于待会检验是否全部赋值完毕，检验后可以删除
+        
+         # step 2,3: 等频分箱
+        step = 1/box_num
+        records = pd.DataFrame(np.zeros([box_num,10]), columns=['min', 'max', 'accept_total', 'accept_bad', 'accept_good', 'accept_bad_rate', 'reject_total', 'reject_infer_bad', 'reject_infer_good', 'reject_infer_bad_rate'])
+        
+        for i in range(0, box_num):
+            this_range_start = i*step
+            this_range_end = (i+1)*step
+
+            this_range_Accept_index = np.where( (Accept_xy.iloc[:,0]>this_range_start)&(Accept_xy.iloc[:,0]<=this_range_end) )[0]
+            this_range_Reject_index = np.where( (Reject_xy.iloc[:,0]>this_range_start)&(Reject_xy.iloc[:,0]<=this_range_end) )[0]
+            this_range_Accept = Accept_xy.iloc[this_range_Accept_index, :]            
+            this_range_Reject = Reject_xy.iloc[this_range_Reject_index, :]      
+            this_range_Accept_Y = Accept_Y.iloc[this_range_Accept_index]
+            
+            # step 4: 填充records
+            records.loc[i,'min'] = this_range_start
+            records.loc[i,'max'] = this_range_end
+            records.loc[i,'accept_total'] = this_range_Accept.shape[0]
+            records.loc[i,'accept_bad'] = this_range_Accept_Y.value_counts()[1]
+            records.loc[i,'accept_good'] = this_range_Accept_Y.value_counts()[0]
+            records.loc[i,'accept_bad_rate'] = records.loc[i,'accept_bad']/records.loc[i,'accept_good']
+            records.loc[i,'reject_total'] = this_range_Reject.shape[0]
+            records.loc[i,'reject_infer_bad_rate'] = records.loc[i,'accept_bad_rate'] * ideal_bad_rate
+            records.loc[i,'reject_infer_good'] = np.floor( records.loc[i,'reject_total']/(1+records.loc[i,'reject_infer_bad_rate']) )
+            records.loc[i,'reject_infer_bad'] = int( records.loc[i,'reject_total']-records.loc[i,'reject_infer_good'] )
+             
+            # step 5: 根据records随机分配reject客户的y
+            infer_bad = this_range_Reject.sample(n=int(records.loc[i,'reject_infer_bad']), axis=0, random_state=random_seed)
+            bad_index = list( infer_bad.index )
+            good_index = list( set(this_range_Reject.index)-set(bad_index) )
+            Reject_y_infer.iloc[bad_index] = 1
+            Reject_y_infer.iloc[good_index] = 0
+        
+        All_y_infer = pd.concat([Accept_Y, Reject_y_infer], axis=0).reset_index(drop=True)
+        
+        # step 6: 评分卡对象
+        sc_All_infer = ScoreCard(All, All_y_infer)
+        sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
+        
+        performance_return = InferReject.get_performance(sc_All_infer, sc_Reject_test)         
+                 
+        return performance_return
+    
     
     '''
     以下为通用函数
@@ -380,7 +574,7 @@ class InferReject:
     def get_performance(train_card, test_card, **kw):
         '''
         函数解释：
-            给定train, test的评分卡对象，以及可选择的建模参数，输出预测表现，返回两个的auc_ks_return
+            给定train, test的评分卡对象，以及可选择的建模参数，输出预测表现，返回train, test,以及reject_test的auc_ks_return
         '''
         
         # woe分箱
@@ -425,21 +619,26 @@ class InferReject:
 sc_Accept_transform = ScoreCard.transform_discrete_static(Accept, sc_transform)
 
 Reject_woe = x_reject_woe.copy()
+Reject_test_woe = x_reject_test_woe.copy()
 Accept_woe = ScoreCard.orig_2_woe(sc_Accept_transform['x_new'], binning_return)
 Accept_woe = Accept_woe.loc[:, Reject_woe.columns]
 
 kgb = Lr_return['model']
-ir = InferReject(pd.concat([Accept_Y,Accept_woe],axis=1), pd.concat([Reject_Y,Reject_woe],axis=1), kgb)
+ir = InferReject(pd.concat([Accept_Y,Accept_woe],axis=1), pd.concat([Reject_Y,Reject_woe],axis=1), pd.concat([Reject_test_Y,Reject_test_woe],axis=1), kgb)
 
-hard_cutoff_performance = ir.hard_cutoff()
-fuzzy_augmentation_performance = ir.fuzzy_augmentation()
-reweighting_performance = ir.reweighting()
-
+performance_hard_cutoff = ir.hard_cutoff()
+performance_fuzzy_augmentation = ir.fuzzy_augmentation()
+performance_reweighting = ir.reweighting()
+performance_extrapolation = ir.extrapolation()
 
 
         
 
-
+'''
+Accept = Accept_woe.copy()
+Reject = Reject_woe.copy()
+Reject_test = Reject_test_woe.copy()
+'''
 
 
 
