@@ -493,13 +493,14 @@ class ScoreCard:
             # p test
             logit = sm.Logit(y, x)
             result = logit.fit()
-            print('Parameters: ', result.params)
+            #print('Parameters: ', result.params)
             margeff = result.get_margeff(dummy=True)
-            print(margeff.summary())
+            #print(margeff.summary())
             
             Lr_return = {'model': Lr,
                          'coef_Lr': coef_Lr,
-                         'coef_intercept': coef_intercept}
+                         'coef_intercept': coef_intercept,
+                         'p_test':margeff}
             return Lr_return
         else:
             # 获取kw参数
@@ -533,13 +534,14 @@ class ScoreCard:
             # p test
             logit = sm.Logit(y, x)
             result = logit.fit()
-            print('Parameters: ', result.params)
+            #print('Parameters: ', result.params)
             margeff = result.get_margeff(dummy=True)
-            print(margeff.summary())
+            #print(margeff.summary())
             
             Lr_return = {'model': Lr,
                          'coef_Lr': coef_Lr,
                          'coef_intercept': coef_intercept,
+                         'p_test':margeff,
                          'params':kw}
             
             return Lr_return

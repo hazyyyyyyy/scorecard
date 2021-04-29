@@ -4,6 +4,8 @@ Created on Fri Apr 16 12:46:08 2021
 
 @author: Administrator
 """
+import warnings
+warnings.filterwarnings('ignore')
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -334,6 +336,7 @@ class InferReject:
         sc_All_infer = ScoreCard(All_infer, All_infer_Y)
         sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
         
+        print('\n\n---------------------hard_cutoff表现---------------------')
         performance_return = InferReject.get_performance(sc_All_infer, sc_Reject_test)
                          
         return performance_return
@@ -392,6 +395,7 @@ class InferReject:
         sc_All_infer = ScoreCard(All, All_Y)
         sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
         
+        print('\n\n---------------------fuzzy_augmentation表现---------------------')
         performance_return = InferReject.get_performance(sc_All_infer, sc_Reject_test)      
         
         return performance_return
@@ -463,6 +467,7 @@ class InferReject:
         sc_Accept_infer = ScoreCard(Accept, Accept_Y)
         sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
         
+        print('\n\n---------------------reweighting表现---------------------')
         performance_return = InferReject.get_performance(sc_Accept_infer, sc_Reject_test, sample_weight=Accept_infer_weight)      
         
         return performance_return
@@ -536,10 +541,89 @@ class InferReject:
         sc_All_infer = ScoreCard(All, All_y_infer)
         sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
         
+        print('\n\n---------------------extrapolation表现---------------------')
         performance_return = InferReject.get_performance(sc_All_infer, sc_Reject_test)         
                  
         return performance_return
     
+    def iter_reclassification(self, standard='ks'):
+        '''
+        迭代标准：KS，后期可以加入其他标准
+        
+        step 1. 构建 KGB 模型，对拒绝样本打分，得到 p(Good)
+        step 2. 将拒绝样本按 p(Good) 降序排列，设置 cutoff ，
+                若高于 cutoff 则标记为 good ，反之标记为 bad 。
+        step 3. 加入推断的好坏样本，构建 AGB 模型，对拒绝样本打分，得到新的 p(Good) 。
+        step 4. 迭代训练，直到模型参数收敛。如 log(odds)-score 曲线位置不再变化。
+        '''
+        Accept = self.Accept
+        Reject = self.Reject
+        Reject_test = self.Reject_test
+        Accept_Y = self.Accept_Y
+        Reject_Y = self.Reject_Y
+        Reject_test_Y = self.Reject_test_Y
+        kgb = self.kgb
+        
+        # step 1: 得到KGB的返回
+        Reject_y_pred = kgb.predict_proba(Reject)
+        
+        # step 2,3,4: 求cutoff
+        cutoff_range = np.arange(0.1, 1.0, 0.1)
+        
+        max_ks = 0
+        max_ks_cutoff = 0
+        for i in cutoff_range:
+            # 获取当前cutoff下的预测结果
+            try:
+                ctf_result = InferReject.cutoff(i, Reject_y_pred)
+            except Exception:
+                continue
+            y_pred_reject = ctf_result['y_pred_reject']['pred']
+            # 构建infer出的全量数据
+            All = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
+            All_y_infer = pd.concat([Accept_Y,y_pred_reject],axis=0).reset_index(drop=True)
+            # 建立AGB模型，与KGB的数据表现对比
+            sc_All_infer = ScoreCard(All, All_y_infer)
+            sc_Accept = ScoreCard(Accept, Accept_Y)
+            # 获得模型表现
+            this_round_performance = InferReject.get_performance(sc_All_infer, sc_Accept)
+            if standard == 'ks':
+                all_ks = this_round_performance['auc_ks_return_infer']['ks']
+                reject_ks = this_round_performance['auc_ks_return_test_infer']['ks']
+                # 检验是否出现极端情况/过拟合
+                if reject_ks>0.6 or all_ks>0.6: #极端情况
+                    print("\n[极端情况]当前cutoff: %s; AGB_ks: %.2f; Reject_ks: %.2f"%(i,all_ks,reject_ks))
+                    continue
+                elif np.abs(all_ks-reject_ks)>0.05: #过拟合
+                    print("\n[过拟合]当前cutoff: %s; AGB_ks: %.2f; Reject_ks: %.2f"%(i,all_ks,reject_ks))
+                    continue
+                # 非异常情况下才进行判断
+                else:
+                    if reject_ks>max_ks:
+                        print("\n[正常判断]当前cutoff: %s; AGB_ks: %.2f; Reject_ks: %.2f"%(i,all_ks,reject_ks))
+                        max_ks = reject_ks
+                        max_ks_cutoff = i
+                    else:
+                        print("\n[break]当前cutoff: %s; AGB_ks: %.2f; Reject_ks: %.2f"%(i,all_ks,reject_ks))
+                        break
+            else:
+                continue
+        
+        # cutoff函数执行替换y_pred为该cutoff下的label
+        ctf_result = InferReject.cutoff(max_ks_cutoff, Reject_y_pred)
+        y_pred_reject = ctf_result['y_pred_reject']['pred']
+        All = pd.concat([Accept, Reject], axis=0).reset_index(drop=True)
+        All_y_infer = pd.concat([Accept_Y,y_pred_reject],axis=0).reset_index(drop=True)
+        
+        # 评分卡对象
+        sc_All_infer = ScoreCard(All, All_y_infer)
+        sc_Reject_test = ScoreCard(Reject_test, Reject_test_Y)
+        
+        print('\n\n---------------------iter_reclassification表现---------------------')
+        performance_return = InferReject.get_performance(sc_All_infer, sc_Reject_test)
+        
+        return performance_return
+        
     
     '''
     以下为通用函数
@@ -564,11 +648,16 @@ class InferReject:
                 return 0
             
         y_pred_reject['pred'] = y_pred_reject['prob_1'].apply(lambda x:get_result(x))
-        bad_rate = y_pred_reject['pred'].value_counts()[1]/y_pred_reject['pred'].value_counts()[0]
         
-        result = {'y_pred_reject':y_pred_reject, 'bad_rate':bad_rate}
-        
-        return result
+        if y_pred_reject['pred'].value_counts().shape[0]==1:
+            raise Exception("cutoff定义错误，仅有一种预测结果")
+        else:
+            
+            bad_rate = y_pred_reject['pred'].value_counts()[1]/y_pred_reject['pred'].value_counts()[0]
+            
+            result = {'y_pred_reject':y_pred_reject, 'bad_rate':bad_rate}
+            
+            return result
     
     @staticmethod
     def get_performance(train_card, test_card, **kw):
@@ -630,7 +719,7 @@ performance_hard_cutoff = ir.hard_cutoff()
 performance_fuzzy_augmentation = ir.fuzzy_augmentation()
 performance_reweighting = ir.reweighting()
 performance_extrapolation = ir.extrapolation()
-
+performance_iter_reclassification = ir.iter_reclassification()
 
         
 
